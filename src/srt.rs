@@ -72,7 +72,7 @@ Hello world
 00:00:02,500 --> 00:00:05,000
 This is a test
 ";
-        let entries = SrtParser::parse(content).unwrap();
+        let entries = SrtParser::parse_file(content).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].text.trim(), "Hello world");
         assert_eq!(entries[1].text.trim(), "This is a test");
