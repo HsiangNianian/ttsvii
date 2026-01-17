@@ -21,6 +21,13 @@ impl SrtParser {
         Self::convert_to_entries(subtitles)
     }
 
+    pub fn parse(content: &str) -> Result<Vec<SrtEntry>> {
+        let subtitles = Subtitles::parse_from_str(content.to_string())
+            .map_err(|e| anyhow::anyhow!("解析 SRT 文件失败: {}", e))?;
+
+        Self::convert_to_entries(subtitles)
+    }
+
     fn convert_to_entries(subtitles: Subtitles) -> Result<Vec<SrtEntry>> {
         let mut entries = Vec::new();
 
@@ -72,7 +79,7 @@ Hello world
 00:00:02,500 --> 00:00:05,000
 This is a test
 ";
-        let entries = SrtParser::parse_file(content).unwrap();
+        let entries = SrtParser::parse(content).unwrap();
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].text.trim(), "Hello world");
         assert_eq!(entries[1].text.trim(), "This is a test");

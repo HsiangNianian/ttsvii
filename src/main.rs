@@ -115,7 +115,8 @@ async fn main() -> Result<()> {
         println!("所有任务执行完成，正在合并音频...");
 
         // 收集所有合成的音频文件
-        let mut audio_files: Vec<PathBuf> = tasks.iter().map(|task| task.output_path.clone()).collect();
+        let mut audio_files: Vec<PathBuf> =
+            tasks.iter().map(|task| task.output_path.clone()).collect();
 
         // 按索引排序
         audio_files.sort();
