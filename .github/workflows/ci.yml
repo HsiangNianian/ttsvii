@@ -102,7 +102,6 @@ jobs:
           - os: windows-latest
             target: x86_64-pc-windows-gnu
             artifact_name: ttsvii-x86_64-pc-windows-gnu
-            use-cross: true
           # macOS
           - os: macos-latest
             target: x86_64-apple-darwin

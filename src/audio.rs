@@ -22,7 +22,13 @@ impl AudioSplitter {
         let output_path = output_dir.join(format!("segment_{:04}.wav", index));
 
         // 使用 ffmpeg 切分音频
+        // 使用 -threads 1 限制每个进程的线程数，减少内存占用
+        // 使用 -loglevel error 减少日志输出
         let output = tokio::process::Command::new("ffmpeg")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-threads")
+            .arg("1")
             .arg("-i")
             .arg(audio_path)
             .arg("-ss")

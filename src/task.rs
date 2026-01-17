@@ -107,8 +107,22 @@ impl TaskManager {
         Ok(Self { tasks })
     }
 
-    pub async fn prepare_audio_segments(&self, audio_path: &Path) -> Result<()> {
-        // 并行切分所有音频片段
+    pub async fn prepare_audio_segments(
+        &self,
+        audio_path: &Path,
+        max_concurrent: usize,
+    ) -> Result<()> {
+        // 使用信号量限制并发数，避免内存和CPU过载
+        let semaphore = Arc::new(Semaphore::new(max_concurrent));
+        let progress = Arc::new(ProgressBar::new(self.tasks.len() as u64));
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} 切分音频 ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        // 使用并发控制切分音频片段
         let futures: Vec<_> = self
             .tasks
             .iter()
@@ -119,28 +133,40 @@ impl TaskManager {
                 let start = task.entry.start_time;
                 let end = task.entry.end_time;
                 let index = task.entry.index;
+                let semaphore = semaphore.clone();
+                let progress = progress.clone();
 
                 async move {
-                    let output_dir = speaker_path.parent().unwrap();
+                    // 获取并发许可
+                    let _permit = semaphore.acquire().await.unwrap();
 
-                    // 切分音频片段到临时文件
-                    let temp_path =
-                        AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
-                            .await?;
+                    let result = async {
+                        let output_dir = speaker_path.parent().unwrap();
 
-                    // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
-                    tokio::fs::copy(&temp_path, &speaker_path).await?;
-                    tokio::fs::copy(&temp_path, &emotion_path).await?;
+                        // 切分音频片段到临时文件
+                        let temp_path =
+                            AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
+                                .await?;
 
-                    // 删除临时切分文件（speaker 和 emotion 文件保留在 tmp 目录，任务完成后统一删除）
-                    let _ = tokio::fs::remove_file(&temp_path).await;
+                        // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
+                        tokio::fs::copy(&temp_path, &speaker_path).await?;
+                        tokio::fs::copy(&temp_path, &emotion_path).await?;
 
-                    Ok::<(), anyhow::Error>(())
+                        // 删除临时切分文件（speaker 和 emotion 文件保留在 tmp 目录，任务完成后统一删除）
+                        let _ = tokio::fs::remove_file(&temp_path).await;
+
+                        Ok::<(), anyhow::Error>(())
+                    }
+                    .await;
+
+                    progress.inc(1);
+                    result
                 }
             })
             .collect();
 
         futures::future::try_join_all(futures).await?;
+        progress.finish_with_message("音频切分完成");
         Ok(())
     }
 

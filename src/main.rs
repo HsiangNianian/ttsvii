@@ -29,9 +29,13 @@ struct Args {
     #[arg(short, long, default_value = "./output")]
     output: PathBuf,
 
-    /// 最大并发数
+    /// 最大并发数（API 请求）
     #[arg(long, default_value_t = 10)]
     max_concurrent: usize,
+
+    /// 音频切分并发数（建议不超过 CPU 核心数）
+    #[arg(long, default_value_t = 4)]
+    split_concurrent: usize,
 }
 
 #[tokio::main]
@@ -68,9 +72,10 @@ async fn main() -> Result<()> {
         // 创建任务管理器
         let task_manager = TaskManager::new(srt_entries, &args.audio, &tmp_dir, &output_task_dir)?;
 
-        println!("正在切分音频文件...");
-        task_manager.prepare_audio_segments(&args.audio).await?;
-        println!("音频切分完成");
+        println!("正在切分音频文件（并发数: {}）...", args.split_concurrent);
+        task_manager
+            .prepare_audio_segments(&args.audio, args.split_concurrent)
+            .await?;
 
         // 创建 API 客户端
         let api_client = std::sync::Arc::new(api::ApiClient::new(args.api_url.clone()));
