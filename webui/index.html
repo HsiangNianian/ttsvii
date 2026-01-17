@@ -1,0 +1,596 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>语音克隆批量处理工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            min-height: 100vh;
+            padding: 20px;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            overflow: hidden;
+        }
+
+        .header {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 30px;
+            text-align: center;
+        }
+
+        .header h1 {
+            font-size: 2.5em;
+            margin-bottom: 10px;
+        }
+
+        .content {
+            padding: 30px;
+        }
+
+        .section {
+            margin-bottom: 30px;
+        }
+
+        .section-title {
+            font-size: 1.5em;
+            color: #333;
+            margin-bottom: 20px;
+            padding-bottom: 10px;
+            border-bottom: 2px solid #667eea;
+        }
+
+        .form-group {
+            margin-bottom: 20px;
+        }
+
+        label {
+            display: block;
+            margin-bottom: 8px;
+            color: #555;
+            font-weight: 500;
+        }
+
+        input[type="text"],
+        input[type="number"],
+        input[type="file"] {
+            width: 100%;
+            padding: 12px;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            font-size: 16px;
+            transition: border-color 0.3s;
+        }
+
+        input[type="text"]:focus,
+        input[type="number"]:focus {
+            outline: none;
+            border-color: #667eea;
+        }
+
+        .file-input-wrapper {
+            position: relative;
+            display: inline-block;
+            width: 100%;
+        }
+
+        .file-input-wrapper input[type="file"] {
+            padding: 10px;
+            cursor: pointer;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 15px;
+            margin-top: 30px;
+        }
+
+        button {
+            flex: 1;
+            padding: 15px 30px;
+            font-size: 18px;
+            font-weight: 600;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            transition: all 0.3s;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .btn-start {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+        }
+
+        .btn-start:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(102, 126, 234, 0.4);
+        }
+
+        .btn-stop {
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            color: white;
+        }
+
+        .btn-stop:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(245, 87, 108, 0.4);
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .status-panel {
+            background: #f5f5f5;
+            border-radius: 10px;
+            padding: 20px;
+            margin-top: 20px;
+        }
+
+        .status-item {
+            display: flex;
+            justify-content: space-between;
+            padding: 10px 0;
+            border-bottom: 1px solid #e0e0e0;
+        }
+
+        .status-item:last-child {
+            border-bottom: none;
+        }
+
+        .status-label {
+            font-weight: 600;
+            color: #666;
+        }
+
+        .status-value {
+            color: #333;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 30px;
+            background: #e0e0e0;
+            border-radius: 15px;
+            overflow: hidden;
+            margin: 20px 0;
+            position: relative;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea 0%, #764ba2 100%);
+            transition: width 0.3s ease;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            color: white;
+            font-weight: 600;
+        }
+
+        .state-badge {
+            display: inline-block;
+            padding: 5px 15px;
+            border-radius: 20px;
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .state-idle {
+            background: #e0e0e0;
+            color: #666;
+        }
+
+        .state-running {
+            background: #4caf50;
+            color: white;
+        }
+
+        .state-paused {
+            background: #ff9800;
+            color: white;
+        }
+
+        .state-completed {
+            background: #2196f3;
+            color: white;
+        }
+
+        .state-error {
+            background: #f44336;
+            color: white;
+        }
+
+        .message-box {
+            background: #fff3cd;
+            border: 1px solid #ffc107;
+            border-radius: 8px;
+            padding: 15px;
+            margin-top: 20px;
+            color: #856404;
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+
+        .log-area {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            border-radius: 8px;
+            padding: 15px;
+            max-height: 300px;
+            overflow-y: auto;
+            font-family: 'Courier New', monospace;
+            font-size: 14px;
+            margin-top: 20px;
+        }
+
+        .log-entry {
+            margin-bottom: 5px;
+            padding: 5px;
+        }
+
+        .log-entry.error {
+            color: #f44336;
+        }
+
+        .log-entry.success {
+            color: #4caf50;
+        }
+
+        .log-entry.info {
+            color: #2196f3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>🎙️ 语音克隆批量处理工具</h1>
+            <p>通过 Web 界面管理您的语音合成任务</p>
+        </div>
+
+        <div class="content">
+            <div class="section">
+                <h2 class="section-title">任务配置</h2>
+                <form id="configForm">
+                    <div class="grid">
+                        <div class="form-group">
+                            <label for="api_url">API 基础 URL</label>
+                            <input type="text" id="api_url" name="api_url" value="http://183.147.142.111:63364" required>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="audio">音频文件</label>
+                            <input type="file" id="audio" name="audio" accept="audio/*" required>
+                            <small style="color: #666; display: block; margin-top: 5px;">请选择音频文件（支持 MP3、WAV 等格式）</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="srt">SRT 字幕文件</label>
+                            <input type="file" id="srt" name="srt" accept=".srt,text/plain" required>
+                            <small style="color: #666; display: block; margin-top: 5px;">请选择 SRT 字幕文件</small>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="output">输出目录</label>
+                            <input type="text" id="output" name="output" value="./output" required>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="max_concurrent">最大并发数（API 请求）</label>
+                            <input type="number" id="max_concurrent" name="max_concurrent" value="10" min="1" required>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="split_concurrent">音频切分并发数</label>
+                            <input type="number" id="split_concurrent" name="split_concurrent" value="4" min="1" required>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="batch_size">批次大小</label>
+                            <input type="number" id="batch_size" name="batch_size" value="5" min="1" required>
+                        </div>
+
+                        <div class="form-group">
+                            <label for="rest_duration">批次间休息时间（秒）</label>
+                            <input type="number" id="rest_duration" name="rest_duration" value="1" min="0" required>
+                        </div>
+                    </div>
+
+                    <div class="button-group">
+                        <button type="button" class="btn-start" id="startBtn" onclick="startTask()">开始任务</button>
+                        <button type="button" class="btn-stop" id="stopBtn" onclick="stopTask()" disabled>停止任务</button>
+                    </div>
+                </form>
+            </div>
+
+            <div class="section">
+                <h2 class="section-title">任务状态</h2>
+                <div class="status-panel">
+                    <div class="status-item">
+                        <span class="status-label">状态:</span>
+                        <span class="status-value">
+                            <span class="state-badge" id="stateBadge">空闲</span>
+                        </span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">任务 ID:</span>
+                        <span class="status-value" id="taskId">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">进度:</span>
+                        <span class="status-value" id="progressText">0 / 0</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">成功:</span>
+                        <span class="status-value" id="successCount">0</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">失败:</span>
+                        <span class="status-value" id="failureCount">0</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">跳过:</span>
+                        <span class="status-value" id="skippedCount">0</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">当前批次:</span>
+                        <span class="status-value" id="batchInfo">-</span>
+                    </div>
+                    <div class="status-item">
+                        <span class="status-label">输出路径:</span>
+                        <span class="status-value" id="outputPath">-</span>
+                    </div>
+                </div>
+
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+                </div>
+
+                <div class="message-box" id="messageBox">
+                    <strong>消息:</strong> <span id="messageText">就绪</span>
+                </div>
+            </div>
+
+            <div class="section">
+                <h2 class="section-title">实时日志</h2>
+                <div class="log-area" id="logArea"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let ws = null;
+        let reconnectAttempts = 0;
+        const maxReconnectAttempts = 5;
+
+        function getWebSocketUrl() {
+            const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+            return `${protocol}//${window.location.host}/ws`;
+        }
+
+        function connectWebSocket() {
+            if (ws && ws.readyState === WebSocket.OPEN) {
+                return;
+            }
+
+            ws = new WebSocket(getWebSocketUrl());
+
+            ws.onopen = () => {
+                reconnectAttempts = 0;
+                addLog('WebSocket 连接已建立', 'success');
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const status = JSON.parse(event.data);
+                    updateStatus(status);
+                } catch (e) {
+                    console.error('解析状态数据失败:', e);
+                }
+            };
+
+            ws.onerror = (error) => {
+                console.error('WebSocket 错误:', error);
+                addLog('WebSocket 连接错误', 'error');
+            };
+
+            ws.onclose = () => {
+                addLog('WebSocket 连接已关闭', 'info');
+                if (reconnectAttempts < maxReconnectAttempts) {
+                    reconnectAttempts++;
+                    setTimeout(() => {
+                        addLog(`尝试重新连接 (${reconnectAttempts}/${maxReconnectAttempts})...`, 'info');
+                        connectWebSocket();
+                    }, 3000);
+                }
+            };
+        }
+
+        function updateStatus(status) {
+            // 更新状态徽章
+            const stateBadge = document.getElementById('stateBadge');
+            stateBadge.textContent = getStateText(status.state);
+            stateBadge.className = 'state-badge state-' + status.state;
+
+            // 更新任务 ID
+            document.getElementById('taskId').textContent = status.task_id || '-';
+
+            // 更新进度
+            const progressText = `${status.progress} / ${status.total}`;
+            document.getElementById('progressText').textContent = progressText;
+
+            // 更新统计
+            document.getElementById('successCount').textContent = status.success;
+            document.getElementById('failureCount').textContent = status.failure;
+            document.getElementById('skippedCount').textContent = status.skipped;
+
+            // 更新批次信息
+            if (status.total_batches > 0) {
+                document.getElementById('batchInfo').textContent = `${status.current_batch} / ${status.total_batches}`;
+            } else {
+                document.getElementById('batchInfo').textContent = '-';
+            }
+
+            // 更新输出路径
+            document.getElementById('outputPath').textContent = status.output_path || '-';
+
+            // 更新进度条
+            let percentage = 0;
+            if (status.total > 0) {
+                percentage = (status.progress / status.total) * 100;
+            }
+            const progressFill = document.getElementById('progressFill');
+            progressFill.style.width = percentage + '%';
+            progressFill.textContent = percentage.toFixed(1) + '%';
+
+            // 更新消息
+            document.getElementById('messageText').textContent = status.message;
+
+            // 更新按钮状态
+            const startBtn = document.getElementById('startBtn');
+            const stopBtn = document.getElementById('stopBtn');
+            if (status.state === 'running') {
+                startBtn.disabled = true;
+                stopBtn.disabled = false;
+            } else if (status.state === 'idle' || status.state === 'completed' || status.state === 'error') {
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            } else if (status.state === 'paused') {
+                startBtn.disabled = false;
+                stopBtn.disabled = true;
+            }
+
+            // 添加日志
+            addLog(status.message, getLogType(status.state));
+        }
+
+        function getStateText(state) {
+            const stateMap = {
+                'idle': '空闲',
+                'running': '运行中',
+                'paused': '已暂停',
+                'completed': '已完成',
+                'error': '错误'
+            };
+            return stateMap[state] || state;
+        }
+
+        function getLogType(state) {
+            if (state === 'error') return 'error';
+            if (state === 'completed') return 'success';
+            return 'info';
+        }
+
+        function addLog(message, type = 'info') {
+            const logArea = document.getElementById('logArea');
+            const entry = document.createElement('div');
+            entry.className = 'log-entry ' + type;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            logArea.appendChild(entry);
+            logArea.scrollTop = logArea.scrollHeight;
+        }
+
+        async function startTask() {
+            const form = document.getElementById('configForm');
+            const formData = new FormData(form);
+            
+            // 检查文件是否已选择
+            const audioFile = formData.get('audio');
+            const srtFile = formData.get('srt');
+            
+            if (!audioFile || audioFile.size === 0) {
+                alert('请选择音频文件');
+                return;
+            }
+            
+            if (!srtFile || srtFile.size === 0) {
+                alert('请选择 SRT 字幕文件');
+                return;
+            }
+
+            // 添加其他配置参数
+            formData.append('api_url', document.getElementById('api_url').value);
+            formData.append('output', document.getElementById('output').value);
+            formData.append('max_concurrent', document.getElementById('max_concurrent').value);
+            formData.append('split_concurrent', document.getElementById('split_concurrent').value);
+            formData.append('batch_size', document.getElementById('batch_size').value);
+            formData.append('rest_duration', document.getElementById('rest_duration').value);
+
+            try {
+                addLog('正在上传文件...', 'info');
+                const response = await fetch('/api/start', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    addLog('任务已启动', 'success');
+                } else {
+                    addLog('启动任务失败: ' + result.error, 'error');
+                    alert('启动任务失败: ' + result.error);
+                }
+            } catch (error) {
+                addLog('启动任务时发生错误: ' + error.message, 'error');
+                alert('启动任务时发生错误: ' + error.message);
+            }
+        }
+
+        async function stopTask() {
+            try {
+                const response = await fetch('/api/stop', {
+                    method: 'POST'
+                });
+
+                const result = await response.json();
+                if (result.success) {
+                    addLog('任务已停止', 'info');
+                } else {
+                    addLog('停止任务失败', 'error');
+                }
+            } catch (error) {
+                addLog('停止任务时发生错误: ' + error.message, 'error');
+            }
+        }
+
+        // 页面加载时连接 WebSocket
+        window.addEventListener('load', () => {
+            connectWebSocket();
+            // 定期获取状态（作为 WebSocket 的备用）
+            setInterval(async () => {
+                try {
+                    const response = await fetch('/api/status');
+                    const status = await response.json();
+                    updateStatus(status);
+                } catch (error) {
+                    console.error('获取状态失败:', error);
+                }
+            }, 5000);
+        });
+    </script>
+</body>
+</html>

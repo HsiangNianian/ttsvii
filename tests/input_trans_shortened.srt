@@ -3991,8 +3991,8 @@ Why did you commit a crime?
 
 988
 00:34:22,600 --> 00:34:25,466
-It's the first time I've seen you
- Someone took the initiative to send it to the door
+It's the first time I've seen you 
+Someone took the initiative to send it to the door
 
 989
 00:34:26,266 --> 00:34:28,200

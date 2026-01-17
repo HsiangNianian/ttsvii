@@ -1,9 +1,10 @@
 use crate::api::ApiClient;
 use crate::audio::AudioSplitter;
 use crate::srt::SrtEntry;
-use anyhow::Result;
+use anyhow::{Context, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use tokio::sync::Semaphore;
 
@@ -19,6 +20,8 @@ pub struct TaskExecutor {
     api_client: Arc<ApiClient>,
     semaphore: Arc<Semaphore>,
     progress: Arc<ProgressBar>,
+    success_count: Arc<std::sync::atomic::AtomicU64>,
+    failure_count: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl TaskExecutor {
@@ -35,16 +38,36 @@ impl TaskExecutor {
             api_client,
             semaphore: Arc::new(Semaphore::new(max_concurrent)),
             progress: Arc::new(progress),
+            success_count: Arc::new(AtomicU64::new(0)),
+            failure_count: Arc::new(AtomicU64::new(0)),
         }
     }
 
     pub async fn execute_task(&self, task: Task) -> Result<()> {
         let _permit = self.semaphore.acquire().await.unwrap();
 
+        // 执行任务（内部已经有超时保护）
         let result = self.execute_inner(&task).await;
+
+        // 更新统计
+        match &result {
+            Ok(_) => {
+                self.success_count.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(_) => {
+                self.failure_count.fetch_add(1, Ordering::Relaxed);
+            }
+        }
 
         self.progress.inc(1);
         result
+    }
+
+    pub fn get_stats(&self) -> (u64, u64) {
+        (
+            self.success_count.load(Ordering::Relaxed),
+            self.failure_count.load(Ordering::Relaxed),
+        )
     }
 
     async fn execute_inner(&self, task: &Task) -> Result<()> {
@@ -64,18 +87,20 @@ impl TaskExecutor {
             anyhow::bail!("音频文件为空: {:?}", task.speaker_audio);
         }
 
-        // 调用 API 合成音频
-        let audio_data = self
-            .api_client
-            .synthesize(
+        // 调用 API 合成音频（添加超时保护）
+        let audio_data = tokio::time::timeout(
+            std::time::Duration::from_secs(600), // 10 分钟超时
+            self.api_client.synthesize(
                 text,
                 Some(&task.speaker_audio),
                 Some(&task.emotion_audio),
                 None,
                 None,
                 None,
-            )
-            .await?;
+            ),
+        )
+        .await
+        .context("API 调用超时（超过 10 分钟）")??;
 
         // 验证返回的音频数据
         if audio_data.is_empty() {

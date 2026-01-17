@@ -78,13 +78,14 @@ impl ApiClient {
             form = form.part("emotion_audio", part);
         }
 
-        let response = self
-            .client
-            .post(&url)
-            .multipart(form)
-            .send()
-            .await
-            .context("发送 API 请求失败")?;
+        // 使用超时包装请求，避免请求无限期等待
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(600), // 10 分钟超时
+            self.client.post(&url).multipart(form).send(),
+        )
+        .await
+        .context("API 请求超时（超过 10 分钟）")?
+        .context("发送 API 请求失败")?;
 
         if !response.status().is_success() {
             let status = response.status();

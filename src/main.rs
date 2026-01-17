@@ -2,6 +2,7 @@ mod api;
 mod audio;
 mod srt;
 mod task;
+mod web;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -13,17 +14,21 @@ use uuid::Uuid;
 #[command(name = "ttsvii")]
 #[command(about = "语音克隆批量处理工具", long_about = None)]
 struct Args {
+    /// 启动 Web UI 模式
+    #[arg(long)]
+    webui: bool,
+
     /// API 基础 URL
     #[arg(long, default_value = "http://183.147.142.111:63364")]
     api_url: String,
 
     /// 音频文件路径
     #[arg(short, long)]
-    audio: PathBuf,
+    audio: Option<PathBuf>,
 
     /// SRT 字幕文件路径
     #[arg(short, long)]
-    srt: PathBuf,
+    srt: Option<PathBuf>,
 
     /// 输出目录
     #[arg(short, long, default_value = "./output")]
@@ -36,12 +41,93 @@ struct Args {
     /// 音频切分并发数（建议不超过 CPU 核心数）
     #[arg(long, default_value_t = 4)]
     split_concurrent: usize,
+
+    /// 批次大小（每处理多少轮并发后休息）
+    #[arg(long, default_value_t = 5)]
+    batch_size: usize,
+
+    /// 批次间休息时间（秒）
+    #[arg(long, default_value_t = 1)]
+    rest_duration: u64,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
 
+    // 如果没有提供 audio 和 srt 参数，或者明确指定了 --webui，则启动 Web UI
+    let should_start_webui = args.webui || (args.audio.is_none() && args.srt.is_none());
+
+    if should_start_webui {
+        return start_webui().await;
+    }
+
+    // 命令行模式
+    let audio = args.audio.context("必须提供音频文件路径 (-a/--audio)")?;
+    let srt = args.srt.context("必须提供 SRT 文件路径 (-s/--srt)")?;
+
+    run_cli_mode(
+        args.api_url,
+        args.output,
+        args.max_concurrent,
+        args.split_concurrent,
+        args.batch_size,
+        args.rest_duration,
+        audio,
+        srt,
+    )
+    .await
+}
+
+async fn start_webui() -> Result<()> {
+    use axum::serve;
+    use std::net::SocketAddr;
+    use tokio::net::TcpListener;
+    use tokio::time::{sleep, Duration};
+
+    let app = web::create_router().await;
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    let url = format!("http://{}", addr);
+
+    println!("正在启动 Web UI 服务器...");
+    println!("Web UI 地址: {}", url);
+
+    let listener = TcpListener::bind(&addr).await?;
+
+    // 在后台启动服务器
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = serve(listener, app.into_make_service()).await {
+            eprintln!("Web 服务器错误: {}", e);
+        }
+    });
+
+    // 等待服务器启动
+    sleep(Duration::from_millis(500)).await;
+
+    // 自动打开浏览器
+    println!("正在打开浏览器...");
+    if let Err(e) = open::that(&url) {
+        eprintln!("无法自动打开浏览器: {}. 请手动访问: {}", e, url);
+    }
+
+    println!("按 Ctrl+C 停止服务器");
+    
+    // 等待服务器运行
+    server_handle.await?;
+    
+    Ok(())
+}
+
+async fn run_cli_mode(
+    api_url: String,
+    output: PathBuf,
+    max_concurrent: usize,
+    split_concurrent: usize,
+    batch_size: usize,
+    rest_duration: u64,
+    audio: PathBuf,
+    srt: PathBuf,
+) -> Result<()> {
     // 检查 ffmpeg
     audio::AudioSplitter::check_ffmpeg()
         .await
@@ -53,51 +139,95 @@ async fn main() -> Result<()> {
     println!("任务 ID: {}", uuid_str);
 
     // 创建输出目录
-    tokio::fs::create_dir_all(&args.output).await?;
+    tokio::fs::create_dir_all(&output).await?;
 
     // 创建临时目录（在当前工作目录的 tmp/{uuid} 目录）
     let tmp_dir = std::env::current_dir()?.join("tmp").join(&uuid_str);
     tokio::fs::create_dir_all(&tmp_dir).await?;
 
     // 创建输出目录（output/{uuid} 目录）
-    let output_task_dir = args.output.join(&uuid_str);
+    let output_task_dir = output.join(&uuid_str);
     tokio::fs::create_dir_all(&output_task_dir).await?;
 
     // 使用 defer 模式确保临时目录被清理
     let result = async {
         println!("正在解析 SRT 文件...");
-        let srt_entries = srt::SrtParser::parse_file(&args.srt).context("解析 SRT 文件失败")?;
+        let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
         println!("找到 {} 个字幕条目", srt_entries.len());
 
         // 创建任务管理器
-        let task_manager = TaskManager::new(srt_entries, &args.audio, &tmp_dir, &output_task_dir)?;
+        let task_manager = TaskManager::new(srt_entries, &audio, &tmp_dir, &output_task_dir)?;
 
-        println!("正在切分音频文件（并发数: {}）...", args.split_concurrent);
+        println!("正在切分音频文件（并发数: {}）...", split_concurrent);
         task_manager
-            .prepare_audio_segments(&args.audio, args.split_concurrent)
+            .prepare_audio_segments(&audio, split_concurrent)
             .await?;
 
         // 创建 API 客户端
-        let api_client = std::sync::Arc::new(api::ApiClient::new(args.api_url.clone()));
+        let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
 
         // 创建任务执行器
-        let executor = TaskExecutor::new(api_client, args.max_concurrent);
+        let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent));
         executor.set_total(task_manager.len() as u64);
 
         println!(
-            "开始处理 {} 个任务（并发数: {}）...",
+            "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
             task_manager.len(),
-            args.max_concurrent
+            max_concurrent,
+            batch_size,
+            rest_duration
         );
 
-        // 执行所有任务
+        // 批次处理任务
         let tasks = task_manager.get_tasks();
-        let futures: Vec<_> = tasks
-            .iter()
-            .map(|task| executor.execute_task(task.clone()))
-            .collect();
+        let tasks_len = tasks.len();
+        let mut all_results = Vec::new();
 
-        let results = futures::future::join_all(futures).await;
+        // 按批次处理（每批次 = batch_size 轮并发）
+        let batch_task_count = batch_size * max_concurrent;
+        let mut batch_num = 0;
+
+        for batch_start in (0..tasks_len).step_by(batch_task_count) {
+            batch_num += 1;
+            let batch_end = (batch_start + batch_task_count).min(tasks_len);
+            let batch_tasks = &tasks[batch_start..batch_end];
+
+            println!("\n批次 {}/{}: 处理任务 {}-{}", 
+                batch_num,
+                (tasks_len + batch_task_count - 1) / batch_task_count,
+                batch_start + 1,
+                batch_end
+            );
+
+            // 执行当前批次
+            let futures: Vec<_> = batch_tasks
+                .iter()
+                .map(|task| {
+                    let task = task.clone();
+                    let executor = executor.clone();
+                    async move { executor.execute_task(task).await }
+                })
+                .collect();
+
+            let batch_results = futures::future::join_all(futures).await;
+            all_results.extend(batch_results);
+
+            // 显示实时统计
+            let (success, failure) = executor.get_stats();
+            let completed = success + failure;
+            println!(
+                "实时统计: 进度 {}/{} | 成功: {} | 失败: {}",
+                completed, tasks_len, success, failure
+            );
+
+            // 如果不是最后一批，休息一下
+            if batch_end < tasks_len {
+                println!("休息 {} 秒...", rest_duration);
+                tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
+            }
+        }
+
+        let results = all_results;
 
         // 检查结果
         let mut errors = Vec::new();
@@ -169,7 +299,7 @@ async fn main() -> Result<()> {
         audio_files.sort();
 
         // 合并音频（保存到 output/{uuid}.wav）
-        let final_output = args.output.join(format!("{}.wav", uuid_str));
+        let final_output = output.join(format!("{}.wav", uuid_str));
         audio::AudioSplitter::merge_audio(&audio_files, &final_output).await?;
 
         println!("完成！最终音频已保存到: {}", final_output.display());
@@ -178,12 +308,17 @@ async fn main() -> Result<()> {
     }
     .await;
 
-    // 无论成功还是失败，都清理临时目录
-    println!("正在清理临时文件...");
-    if let Err(e) = tokio::fs::remove_dir_all(&tmp_dir).await {
-        eprintln!("警告: 清理临时目录失败: {}", e);
-    } else {
-        println!("临时文件已清理");
+    // 询问是否删除临时目录文件
+    let mut input = String::new();
+    println!("是否删除临时目录文件？(y/n)");
+    std::io::stdin().read_line(&mut input).unwrap();
+    if input.trim() == "y" {
+        println!("正在清理临时文件...");
+        if let Err(e) = tokio::fs::remove_dir_all(&tmp_dir).await {
+            eprintln!("警告: 清理临时目录失败: {}", e);
+        } else {
+            println!("临时文件已清理");
+        }
     }
 
     result
