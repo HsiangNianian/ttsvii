@@ -83,8 +83,16 @@ impl TaskExecutor {
         }
 
         let speaker_size = tokio::fs::metadata(&task.speaker_audio).await?.len();
+        // WAV 文件头部至少 44 字节，如果文件太小说明没有实际音频数据
         if speaker_size == 0 {
             anyhow::bail!("音频文件为空: {:?}", task.speaker_audio);
+        }
+        if speaker_size <= 44 {
+            anyhow::bail!(
+                "音频文件无效（文件大小: {} 字节，可能只有文件头）: {:?}",
+                speaker_size,
+                task.speaker_audio
+            );
         }
 
         // 调用 API 合成音频（添加超时保护）
@@ -204,6 +212,16 @@ impl TaskManager {
                         let temp_path =
                             AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
                                 .await?;
+
+                        // 验证切分后的文件大小
+                        let temp_size = tokio::fs::metadata(&temp_path).await?.len();
+                        if temp_size <= 44 {
+                            // 如果文件太小，记录警告但继续处理（会在后续任务执行时被跳过）
+                            eprintln!(
+                                "警告: 任务 {} 的音频片段可能无效（文件大小: {} 字节）",
+                                index, temp_size
+                            );
+                        }
 
                         // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
                         tokio::fs::copy(&temp_path, &speaker_path).await?;

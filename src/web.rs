@@ -365,6 +365,8 @@ impl AppState {
                         if err_msg.contains("文本内容为空")
                             || err_msg.contains("音频文件为空")
                             || err_msg.contains("音频文件不存在")
+                            || err_msg.contains("音频文件无效")
+                            || err_msg.contains("切分的音频文件无效")
                         {
                             skipped.push((i, err_msg));
                         } else {
