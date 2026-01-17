@@ -2,7 +2,7 @@
 /target/
 **/*.rs.bk
 *.pdb
-Cargo.lock
+# 注意：应用程序应该提交 Cargo.lock，库项目才忽略它
 
 # IDE
 .idea/
