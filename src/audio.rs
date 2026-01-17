@@ -305,6 +305,7 @@ impl AudioSplitter {
             if (speed_ratio - 1.0).abs() < 0.01 {
                 // 速度几乎不需要调整，直接复制
                 tokio::fs::copy(audio_file, &processed_file).await?;
+                processed_files.push(processed_file);
             } else {
                 // 使用 atempo 滤镜调整速度
                 // atempo 的范围是 0.5 到 2.0，如果超出范围需要链式使用多个 atempo
@@ -372,9 +373,75 @@ impl AudioSplitter {
                         stderr
                     );
                 }
+
+                // 验证变速后的实际时长，如果与目标时长不一致，需要进一步调整
+                let processed_probe_output = tokio::process::Command::new("ffprobe")
+                    .arg("-v")
+                    .arg("error")
+                    .arg("-show_entries")
+                    .arg("format=duration")
+                    .arg("-of")
+                    .arg("default=noprint_wrappers=1:nokey=1")
+                    .arg(&processed_file)
+                    .output()
+                    .await?;
+
+                if processed_probe_output.status.success() {
+                    let processed_duration_str = String::from_utf8_lossy(&processed_probe_output.stdout);
+                    if let Ok(processed_duration_sec) = processed_duration_str.trim().parse::<f64>() {
+                        let duration_diff = (processed_duration_sec - target_duration_sec).abs();
+                        // 如果差值超过 50 毫秒，需要进一步调整
+                        if duration_diff > 0.05 {
+                            // 计算需要再次调整的比例
+                            let correction_ratio = target_duration_sec / processed_duration_sec;
+                            
+                            // 如果修正比例在合理范围内（0.5-2.0），进行二次调整
+                            if correction_ratio >= 0.5 && correction_ratio <= 2.0 {
+                                let corrected_file = temp_dir.path().join(format!("corrected_{:04}.wav", i + 1));
+                                
+                                let correction_filter = format!("atempo={:.3}", correction_ratio);
+                                let correction_output = tokio::process::Command::new("ffmpeg")
+                                    .arg("-loglevel")
+                                    .arg("error")
+                                    .arg("-i")
+                                    .arg(&processed_file)
+                                    .arg("-af")
+                                    .arg(correction_filter)
+                                    .arg("-acodec")
+                                    .arg("pcm_s16le")
+                                    .arg("-ar")
+                                    .arg("44100")
+                                    .arg("-ac")
+                                    .arg("2")
+                                    .arg("-y")
+                                    .arg(&corrected_file)
+                                    .output()
+                                    .await
+                                    .context("执行 ffmpeg 时长修正失败")?;
+
+                                if correction_output.status.success() {
+                                    // 使用修正后的文件
+                                    processed_files.push(corrected_file);
+                                } else {
+                                    // 修正失败，使用原始变速后的文件
+                                    processed_files.push(processed_file);
+                                }
+                            } else {
+                                // 修正比例超出范围，使用原始变速后的文件
+                                processed_files.push(processed_file);
+                            }
+                        } else {
+                            // 时长已经足够准确，直接使用
+                            processed_files.push(processed_file);
+                        }
+                    } else {
+                        processed_files.push(processed_file);
+                    }
+                } else {
+                    processed_files.push(processed_file);
+                }
             }
 
-            processed_files.push(processed_file);
             progress.inc(1);
         }
 
@@ -469,6 +536,7 @@ impl AudioSplitter {
         tokio::fs::write(&file_list_path, file_list_content).await?;
 
         // 使用 ffmpeg concat 合并
+        // 注意：不使用 -c copy，而是重新编码以确保时长精确
         let output = tokio::process::Command::new("ffmpeg")
             .arg("-loglevel")
             .arg("error")
@@ -478,8 +546,12 @@ impl AudioSplitter {
             .arg("0")
             .arg("-i")
             .arg(&file_list_path)
-            .arg("-c")
-            .arg("copy")
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg("-ar")
+            .arg("44100")
+            .arg("-ac")
+            .arg("2")
             .arg("-y")
             .arg(output_path)
             .output()
@@ -489,6 +561,37 @@ impl AudioSplitter {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("ffmpeg 合并失败: {}", stderr);
+        }
+
+        // 验证最终音频时长是否与原始音频一致
+        let final_probe_output = tokio::process::Command::new("ffprobe")
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=noprint_wrappers=1:nokey=1")
+            .arg(output_path)
+            .output()
+            .await?;
+
+        let final_duration_sec = if final_probe_output.status.success() {
+            let duration_str = String::from_utf8_lossy(&final_probe_output.stdout);
+            duration_str.trim().parse::<f64>().unwrap_or(0.0)
+        } else {
+            anyhow::bail!("无法获取最终音频时长: {:?}", output_path);
+        };
+
+        // 计算时长差值（允许100毫秒的误差）
+        let duration_diff = (final_duration_sec - original_duration_sec).abs();
+        let tolerance_sec = 0.1; // 100毫秒
+
+        if duration_diff > tolerance_sec {
+            eprintln!(
+                "警告: 最终音频时长 ({:.3}s) 与原始音频时长 ({:.3}s) 不一致，差值: {:.3}s",
+                final_duration_sec, original_duration_sec, duration_diff
+            );
+            // 不报错，只警告，因为可能有小的舍入误差
         }
 
         Ok(())
