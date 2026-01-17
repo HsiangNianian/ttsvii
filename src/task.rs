@@ -81,16 +81,21 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    pub fn new(srt_entries: Vec<SrtEntry>, _audio_path: &Path, output_dir: &Path) -> Result<Self> {
+    pub fn new(
+        srt_entries: Vec<SrtEntry>,
+        _audio_path: &Path,
+        tmp_dir: &Path,
+        output_dir: &Path,
+    ) -> Result<Self> {
         let mut tasks = Vec::new();
 
         for entry in srt_entries {
-            // 切分音频
-            let speaker_audio = output_dir.join(format!("speaker_{}.wav", entry.index));
-            let emotion_audio = output_dir.join(format!("emotion_{}.wav", entry.index));
+            // 切分的音频文件放到临时目录
+            let speaker_audio = tmp_dir.join(format!("speaker_{}.wav", entry.index));
+            let emotion_audio = tmp_dir.join(format!("emotion_{}.wav", entry.index));
+            // 合成的音频文件放到输出目录
             let output_path = output_dir.join(format!("synthesized_{}.wav", entry.index));
 
-            // 异步切分音频（这里先创建任务，实际切分在 execute 时进行）
             tasks.push(Task {
                 entry,
                 speaker_audio,
