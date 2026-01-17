@@ -17,6 +17,12 @@ Thumbs.db
 
 # Output
 /output/
+
+# Temporary files
+/tmp/
+tmp/
+
+# Audio files
 *.wav
 *.mp3
 *.mp4
