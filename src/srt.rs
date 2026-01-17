@@ -24,12 +24,15 @@ impl SrtParser {
     pub fn parse(content: &str) -> Result<Vec<SrtEntry>> {
         let mut entries = Vec::new();
 
-        // 匹配 SRT 条目的正则表达式
-        let entry_re = Regex::new(
-            r"(?m)^(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*\n((?:.*\n?)+?)(?=\n\d+\s*\n|\Z)"
+        // 匹配 SRT 条目头部的正则表达式（序号和时间戳）
+        let header_re = Regex::new(
+            r"(?m)^(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
         ).unwrap();
 
-        for cap in entry_re.captures_iter(content) {
+        let mut last_end = 0;
+        let mut matches: Vec<_> = header_re.captures_iter(content).collect();
+
+        for (i, cap) in matches.iter().enumerate() {
             let index: u32 = cap[1].parse().with_context(|| "无法解析序号")?;
 
             let start_h = cap[2].parse::<i64>()?;
@@ -50,7 +53,21 @@ impl SrtParser {
                 + Duration::seconds(end_s)
                 + Duration::milliseconds(end_ms);
 
-            let text = cap[10].trim().to_string();
+            // 找到时间戳行的结束位置
+            let time_match = cap.get(0).unwrap();
+            let text_start = time_match.end();
+            
+            // 找到下一个条目的开始位置，或者文件结尾
+            let text_end = if i + 1 < matches.len() {
+                matches[i + 1].get(0).unwrap().start()
+            } else {
+                content.len()
+            };
+
+            // 提取文本内容（去除前后的空白行）
+            let text = content[text_start..text_end]
+                .trim()
+                .to_string();
 
             entries.push(SrtEntry {
                 index,
