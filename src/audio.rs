@@ -1,9 +1,9 @@
 use crate::srt::SrtEntry;
 use anyhow::{Context, Result};
 use chrono::Duration;
+use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
-use indicatif::{ProgressBar, ProgressStyle};
 
 pub struct AudioSplitter;
 
@@ -201,11 +201,16 @@ impl AudioSplitter {
     /// audio_files: 音频文件路径列表（已按索引排序）
     /// srt_entries: SRT 条目列表（已按索引排序）
     /// output_path: 输出文件路径
-    pub async fn merge_audio_with_timing(
+    /// progress_callback: 可选的进度回调函数 (当前进度, 总数, 消息)
+    pub async fn merge_audio_with_timing<F>(
         audio_files: &[PathBuf],
         srt_entries: &[SrtEntry],
         output_path: &Path,
-    ) -> Result<()> {
+        mut progress_callback: Option<F>,
+    ) -> Result<()>
+    where
+        F: FnMut(usize, usize, String),
+    {
         if audio_files.len() != srt_entries.len() {
             anyhow::bail!(
                 "音频文件数量 ({}) 与 SRT 条目数量 ({}) 不匹配",
@@ -228,7 +233,11 @@ impl AudioSplitter {
 
         // 处理每个音频文件，根据 SRT 时间戳调整速度
         for (i, (audio_file, entry)) in audio_files.iter().zip(srt_entries.iter()).enumerate() {
-            progress.set_message(format!("处理文件 {}/{}", i + 1, audio_files.len()));
+            let msg = format!("处理文件 {}/{}", i + 1, audio_files.len());
+            progress.set_message(msg.clone());
+            if let Some(ref mut cb) = progress_callback {
+                cb(i + 1, audio_files.len(), msg.clone());
+            }
             // 计算目标时长（从 SRT 时间戳）
             let target_duration_ms = (entry.end_time - entry.start_time).num_milliseconds();
             let target_duration_sec = target_duration_ms as f64 / 1000.0;
@@ -336,7 +345,14 @@ impl AudioSplitter {
             }
 
             processed_files.push(processed_file);
+            progress.inc(1);
         }
+
+        let finish_msg = "速度调整完成";
+        if let Some(ref mut cb) = progress_callback {
+            cb(audio_files.len(), audio_files.len(), finish_msg.to_string());
+        }
+        progress.finish_with_message(finish_msg);
 
         // 合并所有处理后的音频文件
         let file_list_path = temp_dir.path().join("file_list.txt");

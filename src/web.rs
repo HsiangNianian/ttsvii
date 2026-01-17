@@ -471,13 +471,26 @@ impl AppState {
 
                 audio_files.sort();
 
+                // 收集对应的 SRT 条目（按索引排序）
+                let mut srt_entries_for_merge = Vec::new();
+                let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+                sorted_tasks.sort_by_key(|task| task.entry.index);
+                for task in sorted_tasks {
+                    if task.output_path.exists() {
+                        let metadata = tokio::fs::metadata(&task.output_path).await?;
+                        if metadata.len() > 0 {
+                            srt_entries_for_merge.push(task.entry.clone());
+                        }
+                    }
+                }
+
                 // 合并音频
                 let final_output = output_path.join(format!("{}.wav", uuid_str));
                 audio::AudioSplitter::merge_audio(&audio_files, &final_output).await?;
 
                 state
                     .update_status(TaskStatus {
-                        state: "completed".to_string(),
+                        state: "running".to_string(),
                         progress: tasks_len as u64,
                         total: tasks_len as u64,
                         success: success_count as u64,
@@ -485,7 +498,98 @@ impl AppState {
                         skipped: skipped.len() as u64,
                         current_batch: total_batches,
                         total_batches,
-                        message: format!("完成！最终音频已保存到: {}", final_output.display()),
+                        message: format!("原始音频合并完成: {}", final_output.display()),
+                        task_id: Some(uuid_str.clone()),
+                        output_path: None,
+                    })
+                    .await;
+
+                // 生成根据 SRT 时间戳变速后的合并音频
+                let timed_output = output_path.join(format!("{}_timed.wav", uuid_str));
+                state
+                    .update_status(TaskStatus {
+                        state: "running".to_string(),
+                        progress: tasks_len as u64,
+                        total: tasks_len as u64,
+                        success: success_count as u64,
+                        failure: 0,
+                        skipped: skipped.len() as u64,
+                        current_batch: total_batches,
+                        total_batches,
+                        message: format!(
+                            "开始生成根据 SRT 时间戳变速后的合并音频: {}",
+                            timed_output.display()
+                        ),
+                        task_id: Some(uuid_str.clone()),
+                        output_path: None,
+                    })
+                    .await;
+
+                // 克隆需要的变量用于闭包
+                let state_for_callback = state.clone();
+                let uuid_str_for_callback = uuid_str.clone();
+                let tasks_len_for_callback = tasks_len;
+                let success_count_for_callback = success_count;
+                let skipped_len_for_callback = skipped.len();
+                let total_batches_for_callback = total_batches;
+                let audio_files_len = audio_files.len();
+
+                // 总进度 = 原始任务数 + 变速处理的文件数
+                let total_progress = tasks_len_for_callback + audio_files_len;
+
+                audio::AudioSplitter::merge_audio_with_timing(
+                    &audio_files,
+                    &srt_entries_for_merge,
+                    &timed_output,
+                    Some(move |current, total, msg: String| {
+                        // 在异步上下文中更新状态
+                        let state_clone = state_for_callback.clone();
+                        let uuid_str_clone = uuid_str_for_callback.clone();
+                        let tasks_len_clone = tasks_len_for_callback;
+                        let success_count_clone = success_count_for_callback;
+                        let skipped_len_clone = skipped_len_for_callback;
+                        let total_batches_clone = total_batches_for_callback;
+                        let total_progress_clone = total_progress;
+                        // 当前进度 = 已完成的任务数 + 当前变速处理的进度
+                        let current_progress = tasks_len_clone + current;
+                        tokio::spawn(async move {
+                            state_clone
+                                .update_status(TaskStatus {
+                                    state: "running".to_string(),
+                                    progress: current_progress as u64,
+                                    total: total_progress_clone as u64,
+                                    success: success_count_clone as u64,
+                                    failure: 0,
+                                    skipped: skipped_len_clone as u64,
+                                    current_batch: total_batches_clone,
+                                    total_batches: total_batches_clone,
+                                    message: format!("[变速处理] {}/{} - {}", current, total, msg),
+                                    task_id: Some(uuid_str_clone),
+                                    output_path: None,
+                                })
+                                .await;
+                        });
+                    }),
+                )
+                .await?;
+
+                // 更新最终完成状态，进度应该是 100%
+                let total_progress = tasks_len + audio_files.len();
+                state
+                    .update_status(TaskStatus {
+                        state: "completed".to_string(),
+                        progress: total_progress as u64,
+                        total: total_progress as u64,
+                        success: success_count as u64,
+                        failure: 0,
+                        skipped: skipped.len() as u64,
+                        current_batch: total_batches,
+                        total_batches,
+                        message: format!(
+                            "完成！最终音频已保存到: {} (变速版本: {})",
+                            final_output.display(),
+                            timed_output.display()
+                        ),
                         task_id: Some(uuid_str.clone()),
                         output_path: Some(final_output.display().to_string()),
                     })
