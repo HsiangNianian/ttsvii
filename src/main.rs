@@ -45,12 +45,16 @@ async fn main() -> Result<()> {
     // 创建输出目录
     tokio::fs::create_dir_all(&args.output).await?;
 
+    // 创建临时目录（在当前工作目录的 tmp 目录）
+    let tmp_dir = std::env::current_dir()?.join("tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+
     println!("正在解析 SRT 文件...");
     let srt_entries = srt::SrtParser::parse_file(&args.srt).context("解析 SRT 文件失败")?;
     println!("找到 {} 个字幕条目", srt_entries.len());
 
     // 创建任务管理器
-    let task_manager = TaskManager::new(srt_entries, &args.audio, &args.output)?;
+    let task_manager = TaskManager::new(srt_entries, &args.audio, &tmp_dir, &args.output)?;
 
     println!("正在切分音频文件...");
     task_manager.prepare_audio_segments(&args.audio).await?;
