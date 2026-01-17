@@ -216,10 +216,7 @@ impl AppState {
                 let api_client = Arc::new(api::ApiClient::new(config.api_url.clone()));
 
                 // 创建任务执行器
-                let executor = Arc::new(TaskExecutor::new(
-                    api_client,
-                    config.max_concurrent,
-                ));
+                let executor = Arc::new(TaskExecutor::new(api_client, config.max_concurrent));
                 executor.set_total(task_manager.len() as u64);
 
                 let tasks = task_manager.get_tasks();
@@ -239,7 +236,10 @@ impl AppState {
                         total_batches,
                         message: format!(
                             "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
-                            tasks_len, config.max_concurrent, config.batch_size, config.rest_duration
+                            tasks_len,
+                            config.max_concurrent,
+                            config.batch_size,
+                            config.rest_duration
                         ),
                         task_id: Some(uuid_str.clone()),
                         output_path: None,
@@ -286,7 +286,10 @@ impl AppState {
                             total_batches,
                             message: format!(
                                 "批次 {}/{}: 处理任务 {}-{}",
-                                batch_num, total_batches, batch_start + 1, batch_end
+                                batch_num,
+                                total_batches,
+                                batch_start + 1,
+                                batch_end
                             ),
                             task_id: Some(uuid_str.clone()),
                             output_path: None,
@@ -529,7 +532,7 @@ async fn start_task(
     let upload_dir = std::env::current_dir()
         .unwrap_or_else(|_| std::path::PathBuf::from("."))
         .join("uploads");
-    
+
     if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
         return Json(serde_json::json!({
             "success": false,
@@ -554,23 +557,24 @@ async fn start_task(
         None
     }) {
         let name = field.name().unwrap_or("").to_string();
-        
+
         if name == "audio" || name == "srt" {
             // 处理文件上传
-            let original_filename = field.file_name()
+            let original_filename = field
+                .file_name()
                 .unwrap_or(if name == "audio" { "audio" } else { "subtitle" })
                 .to_string();
-            
+
             // 生成唯一文件名（使用 UUID + 原始文件名）
             let unique_id = Uuid::new_v4().to_string();
             let extension = std::path::Path::new(&original_filename)
                 .extension()
                 .and_then(|ext| ext.to_str())
                 .unwrap_or(if name == "audio" { "mp3" } else { "srt" });
-            
+
             let filename = format!("{}_{}.{}", name, unique_id, extension);
             let file_path = upload_dir.join(&filename);
-            
+
             // 读取文件内容
             let data = match field.bytes().await {
                 Ok(data) => data,
@@ -656,13 +660,16 @@ async fn stop_task(State(state): State<AppState>) -> Json<serde_json::Value> {
     Json(serde_json::json!({ "success": true }))
 }
 
-async fn ws_handler(ws: WebSocketUpgrade, State(state): State<AppState>) -> axum::response::Response {
+async fn ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> axum::response::Response {
     ws.on_upgrade(|socket| handle_socket(socket, state))
 }
 
 async fn handle_socket(socket: axum::extract::ws::WebSocket, state: AppState) {
     use futures_util::{SinkExt, StreamExt};
-    
+
     let (mut sender, mut receiver) = socket.split();
     let mut rx = state.tx.subscribe();
 

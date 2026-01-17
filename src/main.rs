@@ -111,10 +111,10 @@ async fn start_webui() -> Result<()> {
     }
 
     println!("按 Ctrl+C 停止服务器");
-    
+
     // 等待服务器运行
     server_handle.await?;
-    
+
     Ok(())
 }
 
@@ -192,7 +192,8 @@ async fn run_cli_mode(
             let batch_end = (batch_start + batch_task_count).min(tasks_len);
             let batch_tasks = &tasks[batch_start..batch_end];
 
-            println!("\n批次 {}/{}: 处理任务 {}-{}", 
+            println!(
+                "\n批次 {}/{}: 处理任务 {}-{}",
                 batch_num,
                 (tasks_len + batch_task_count - 1) / batch_task_count,
                 batch_start + 1,
