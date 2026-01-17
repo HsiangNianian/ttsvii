@@ -516,6 +516,9 @@ impl AppState {
 }
 
 pub async fn create_router() -> Router {
+    use tower::ServiceBuilder;
+    use tower_http::limit::RequestBodyLimitLayer;
+    
     let state = AppState::new();
 
     Router::new()
@@ -527,7 +530,11 @@ pub async fn create_router() -> Router {
         .route("/api/upload/check", get(check_upload))
         .route("/api/upload/merge", post(merge_upload))
         .route("/ws", get(ws_handler))
-        .layer(CorsLayer::permissive())
+        .layer(
+            ServiceBuilder::new()
+                .layer(RequestBodyLimitLayer::new(3 * 1024 * 1024)) // 3MB 限制（每个分块 1MB，加上元数据足够）
+                .layer(CorsLayer::permissive())
+        )
         .with_state(state)
 }
 
@@ -593,27 +600,64 @@ async fn upload_chunk(mut multipart: Multipart) -> Json<serde_json::Value> {
     let mut chunk_data = Vec::new();
 
     // 解析 multipart 数据
-    while let Some(field) = multipart.next_field().await.unwrap_or_else(|e| {
-        eprintln!("解析 multipart 字段失败: {}", e);
-        None
-    }) {
-        let name = field.name().unwrap_or("").to_string();
+    loop {
+        match multipart.next_field().await {
+            Ok(Some(field)) => {
+                let name = field.name().unwrap_or("").to_string();
 
-        if name == "chunk" {
-            if let Ok(data) = field.bytes().await {
-                chunk_data = data.to_vec();
+                match name.as_str() {
+                    "chunk" => {
+                        match field.bytes().await {
+                            Ok(data) => chunk_data = data.to_vec(),
+                            Err(e) => {
+                                eprintln!("读取分块数据失败: {}", e);
+                            }
+                        }
+                    }
+                    "upload_id" => {
+                        match field.text().await {
+                            Ok(text) => upload_id = text,
+                            Err(e) => {
+                                eprintln!("读取 upload_id 失败: {}", e);
+                            }
+                        }
+                    }
+                    "file_type" => {
+                        match field.text().await {
+                            Ok(text) => file_type = text,
+                            Err(e) => {
+                                eprintln!("读取 file_type 失败: {}", e);
+                            }
+                        }
+                    }
+                    "chunk_index" => {
+                        match field.text().await {
+                            Ok(text) => {
+                                chunk_index = text.parse().unwrap_or(0);
+                            }
+                            Err(e) => {
+                                eprintln!("读取 chunk_index 失败: {}", e);
+                            }
+                        }
+                    }
+                    _ => {
+                        // 忽略其他字段（如 filename, file_size, total_chunks）
+                        // 但需要读取数据以推进解析器，否则会阻塞
+                        let _ = field.bytes().await;
+                    }
+                }
             }
-        } else if name == "upload_id" {
-            if let Ok(text) = field.text().await {
-                upload_id = text;
+            Ok(None) => {
+                // 所有字段都已处理完
+                break;
             }
-        } else if name == "file_type" {
-            if let Ok(text) = field.text().await {
-                file_type = text;
-            }
-        } else if name == "chunk_index" {
-            if let Ok(text) = field.text().await {
-                chunk_index = text.parse().unwrap_or(0);
+            Err(e) => {
+                eprintln!("解析 multipart 字段失败: {}", e);
+                eprintln!("错误详情: {:?}", e);
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("解析 multipart 数据失败: {}. 请检查文件大小是否超过限制（5MB）。", e)
+                }));
             }
         }
     }

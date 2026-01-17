@@ -534,7 +534,7 @@
         // 存储选中的文件内容
         let selectedAudioFile = null;
         let selectedSrtFile = null;
-        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
+        const CHUNK_SIZE = 1 * 1024 * 1024; // 1MB per chunk (减小分块大小以避免解析问题)
 
         // 处理文件选择
         function setupFileInputs() {
@@ -625,7 +625,8 @@
                         });
 
                         if (!response.ok) {
-                            throw new Error(`上传失败: ${response.status}`);
+                            const errorText = await response.text().catch(() => '未知错误');
+                            throw new Error(`上传失败 (${response.status}): ${errorText}`);
                         }
 
                         const result = await response.json();
@@ -643,6 +644,7 @@
                         if (retries === 0) {
                             throw new Error(`分块 ${chunkIndex + 1} 上传失败: ${error.message}`);
                         }
+                        uploadStatus.textContent = `分块 ${chunkIndex + 1} 上传失败，重试中... (剩余 ${retries} 次)`;
                         await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒后重试
                     }
                 }
