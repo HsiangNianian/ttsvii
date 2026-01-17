@@ -18,10 +18,10 @@ chrono = "0.4"
 indicatif = "0.17"
 base64 = "0.21"
 uuid = { version = "1.6", features = ["v4"] }
-axum = { version = "0.7", features = ["ws"] }
+axum = { version = "0.7", features = ["ws", "multipart"] }
 tokio-tungstenite = "0.21"
 tower = "0.4"
-tower-http = { version = "0.5", features = ["fs", "cors"] }
+tower-http = { version = "0.5", features = ["fs", "cors", "limit"] }
 open = "5.0"
 futures-util = "0.3"
 

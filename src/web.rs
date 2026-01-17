@@ -2,7 +2,7 @@ use crate::task::{TaskExecutor, TaskManager};
 use crate::{api, audio, srt};
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ws::WebSocketUpgrade, State},
+    extract::{ws::WebSocketUpgrade, Multipart, State},
     response::{Html, Json},
     routing::{get, post},
     Router,
@@ -20,8 +20,18 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConfig {
     pub api_url: String,
+    #[serde(default)]
     pub audio: String,
+    #[serde(default)]
     pub srt: String,
+    #[serde(default)]
+    pub audio_filename: String,
+    #[serde(default)]
+    pub audio_content: String,
+    #[serde(default)]
+    pub srt_filename: String,
+    #[serde(default)]
+    pub srt_content: String,
     pub output: String,
     pub max_concurrent: usize,
     pub split_concurrent: usize,
@@ -513,6 +523,9 @@ pub async fn create_router() -> Router {
         .route("/api/status", get(get_status))
         .route("/api/start", post(start_task))
         .route("/api/stop", post(stop_task))
+        .route("/api/upload/chunk", post(upload_chunk))
+        .route("/api/upload/check", get(check_upload))
+        .route("/api/upload/merge", post(merge_upload))
         .route("/ws", get(ws_handler))
         .layer(CorsLayer::permissive())
         .with_state(state)
@@ -526,90 +539,247 @@ async fn get_status(State(state): State<AppState>) -> Json<TaskStatus> {
     Json(state.status.read().await.clone())
 }
 
-/// 查找文件路径，如果路径不存在，尝试在常见位置查找
-fn find_file_path(path_str: &str) -> Result<PathBuf> {
-    let path = PathBuf::from(path_str);
-    
-    // 如果路径存在，直接返回
-    if path.exists() {
-        return Ok(path);
-    }
-    
-    // 如果只是文件名，尝试在常见位置查找
-    if path.parent().is_none() || path.parent() == Some(std::path::Path::new("")) {
-        let filename = path.file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| anyhow::anyhow!("无效的文件名: {}", path_str))?;
-        
-        // 尝试在当前工作目录查找
-        let current_dir = std::env::current_dir()?;
-        let possible_paths = vec![
-            current_dir.join(filename),
-            current_dir.join("tests").join(filename),
-            current_dir.join("uploads").join(filename),
-        ];
-        
-        for possible_path in possible_paths {
-            if possible_path.exists() {
-                return Ok(possible_path);
-            }
-        }
-        
-        anyhow::bail!("文件不存在且无法找到: {}", path_str);
-    }
-    
-    anyhow::bail!("文件不存在: {}", path_str);
-}
-
 async fn start_task(
     State(state): State<AppState>,
     Json(config): Json<TaskConfig>,
 ) -> Json<serde_json::Value> {
-    // 验证必需的文件路径
-    if config.audio.is_empty() {
+    // 验证文件路径
+    let audio_path = std::path::Path::new(&config.audio);
+    if !audio_path.exists() {
         return Json(serde_json::json!({
             "success": false,
-            "error": "未提供音频文件路径"
+            "error": format!("音频文件不存在: {}", config.audio)
         }));
     }
 
-    if config.srt.is_empty() {
+    let srt_path = std::path::Path::new(&config.srt);
+    if !srt_path.exists() {
         return Json(serde_json::json!({
             "success": false,
-            "error": "未提供 SRT 字幕文件路径"
+            "error": format!("SRT 字幕文件不存在: {}", config.srt)
         }));
     }
 
-    // 验证文件是否存在，如果路径不存在，尝试查找文件
-    let audio_path = match find_file_path(&config.audio) {
-        Ok(path) => path,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "success": false,
-                "error": format!("音频文件: {}", e)
-            }));
-        }
-    };
-    
-    let srt_path = match find_file_path(&config.srt) {
-        Ok(path) => path,
-        Err(e) => {
-            return Json(serde_json::json!({
-                "success": false,
-                "error": format!("SRT 字幕文件: {}", e)
-            }));
-        }
-    };
-    
-    // 更新配置中的路径为实际找到的路径
-    let mut final_config = config;
-    final_config.audio = audio_path.to_string_lossy().to_string();
-    final_config.srt = srt_path.to_string_lossy().to_string();
-
-    match state.start_task(final_config).await {
+    match state.start_task(config).await {
         Ok(_) => Json(serde_json::json!({ "success": true })),
         Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
     }
+}
+
+// 上传分块
+async fn upload_chunk(mut multipart: Multipart) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    
+    // 存储上传信息（实际应用中应该使用数据库或文件系统）
+    static UPLOAD_INFO: OnceLock<Mutex<HashMap<String, Vec<usize>>>> = OnceLock::new();
+    let upload_info = UPLOAD_INFO.get_or_init(|| Mutex::new(HashMap::new()));
+
+    let temp_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("tmp")
+        .join("uploads");
+
+    if let Err(e) = tokio::fs::create_dir_all(&temp_dir).await {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("创建临时目录失败: {}", e)
+        }));
+    }
+
+    let mut upload_id = String::new();
+    let mut file_type = String::new();
+    let mut chunk_index = 0usize;
+    let mut chunk_data = Vec::new();
+
+    // 解析 multipart 数据
+    while let Some(field) = multipart.next_field().await.unwrap_or_else(|e| {
+        eprintln!("解析 multipart 字段失败: {}", e);
+        None
+    }) {
+        let name = field.name().unwrap_or("").to_string();
+
+        if name == "chunk" {
+            if let Ok(data) = field.bytes().await {
+                chunk_data = data.to_vec();
+            }
+        } else if name == "upload_id" {
+            if let Ok(text) = field.text().await {
+                upload_id = text;
+            }
+        } else if name == "file_type" {
+            if let Ok(text) = field.text().await {
+                file_type = text;
+            }
+        } else if name == "chunk_index" {
+            if let Ok(text) = field.text().await {
+                chunk_index = text.parse().unwrap_or(0);
+            }
+        }
+    }
+
+    if upload_id.is_empty() || file_type.is_empty() || chunk_data.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "缺少必要参数"
+        }));
+    }
+
+    // 保存分块
+    let chunk_dir = temp_dir.join(&upload_id);
+    if let Err(e) = tokio::fs::create_dir_all(&chunk_dir).await {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("创建分块目录失败: {}", e)
+        }));
+    }
+
+    let chunk_path = chunk_dir.join(format!("chunk_{}", chunk_index));
+    if let Err(e) = tokio::fs::write(&chunk_path, &chunk_data).await {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("保存分块失败: {}", e)
+        }));
+    }
+
+    // 记录已上传的分块
+    let key = format!("{}_{}", upload_id, file_type);
+    let mut info = upload_info.lock().unwrap();
+    let chunks = info.entry(key.clone()).or_insert_with(Vec::new);
+    if !chunks.contains(&chunk_index) {
+        chunks.push(chunk_index);
+    }
+
+    Json(serde_json::json!({
+        "success": true,
+        "chunk_index": chunk_index
+    }))
+}
+
+// 检查已上传的分块
+async fn check_upload(
+    axum::extract::Query(params): axum::extract::Query<std::collections::HashMap<String, String>>,
+) -> Json<serde_json::Value> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    
+    static UPLOAD_INFO: OnceLock<Mutex<HashMap<String, Vec<usize>>>> = OnceLock::new();
+    let upload_info = UPLOAD_INFO.get_or_init(|| Mutex::new(HashMap::new()));
+    
+    let upload_id = params.get("upload_id").cloned().unwrap_or_default();
+    let file_type = params.get("file_type").cloned().unwrap_or_default();
+
+    if upload_id.is_empty() || file_type.is_empty() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "缺少必要参数"
+        }));
+    }
+
+    let key = format!("{}_{}", upload_id, file_type);
+    let info = upload_info.lock().unwrap();
+    let uploaded_chunks = info.get(&key).cloned().unwrap_or_default();
+
+    Json(serde_json::json!({
+        "success": true,
+        "uploaded_chunks": uploaded_chunks
+    }))
+}
+
+// 合并文件
+async fn merge_upload(Json(params): Json<serde_json::Value>) -> Json<serde_json::Value> {
+    let upload_id = params
+        .get("upload_id")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let file_type = params
+        .get("file_type")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let filename = params
+        .get("filename")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let total_chunks = params
+        .get("total_chunks")
+        .and_then(|v| v.as_u64())
+        .unwrap_or(0) as usize;
+
+    if upload_id.is_empty() || file_type.is_empty() || total_chunks == 0 {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": "缺少必要参数"
+        }));
+    }
+
+    let temp_dir = std::env::current_dir()
+        .unwrap_or_else(|_| std::path::PathBuf::from("."))
+        .join("tmp")
+        .join("uploads");
+
+    let chunk_dir = temp_dir.join(upload_id);
+    let unique_id = Uuid::new_v4().to_string();
+    let extension = std::path::Path::new(filename)
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .unwrap_or(if file_type == "audio" { "mp3" } else { "srt" });
+
+    let final_filename = format!("{}_{}.{}", file_type, unique_id, extension);
+    let final_path = temp_dir.join(&final_filename);
+
+    // 合并所有分块
+    let mut output_file = match tokio::fs::File::create(&final_path).await {
+        Ok(file) => file,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("创建文件失败: {}", e)
+            }));
+        }
+    };
+
+    use tokio::io::AsyncWriteExt;
+    for chunk_index in 0..total_chunks {
+        let chunk_path = chunk_dir.join(format!("chunk_{}", chunk_index));
+        if !chunk_path.exists() {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("分块 {} 不存在", chunk_index)
+            }));
+        }
+
+        let chunk_data = match tokio::fs::read(&chunk_path).await {
+            Ok(data) => data,
+            Err(e) => {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("读取分块 {} 失败: {}", chunk_index, e)
+                }));
+            }
+        };
+
+        if let Err(e) = output_file.write_all(&chunk_data).await {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("写入分块 {} 失败: {}", chunk_index, e)
+            }));
+        }
+    }
+
+    if let Err(e) = output_file.sync_all().await {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("同步文件失败: {}", e)
+        }));
+    }
+
+    // 清理分块目录
+    let _ = tokio::fs::remove_dir_all(&chunk_dir).await;
+
+    Json(serde_json::json!({
+        "success": true,
+        "file_path": final_path.to_string_lossy().to_string()
+    }))
 }
 
 async fn stop_task(State(state): State<AppState>) -> Json<serde_json::Value> {

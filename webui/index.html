@@ -283,14 +283,30 @@
                         <div class="form-group">
                             <label for="audio">音频文件</label>
                             <input type="file" id="audio" name="audio" accept="audio/*" required>
-                            <input type="hidden" id="audio_path" name="audio_path">
+                            <div id="audio_upload_progress" style="display: none; margin-top: 10px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <div style="flex: 1; height: 20px; background: #ddd; border-radius: 10px; overflow: hidden;">
+                                        <div id="audio_progress_bar" style="height: 100%; background: #333; width: 0%; transition: width 0.3s;"></div>
+                                    </div>
+                                    <span id="audio_progress_text" style="font-size: 12px; color: #666;">0%</span>
+                                </div>
+                                <small id="audio_upload_status" style="color: #666; display: block; margin-top: 5px;"></small>
+                            </div>
                             <small id="audio_path_display" style="color: #666; display: block; margin-top: 5px;">请选择音频文件</small>
                         </div>
 
                         <div class="form-group">
                             <label for="srt">SRT 字幕文件</label>
                             <input type="file" id="srt" name="srt" accept=".srt,text/plain" required>
-                            <input type="hidden" id="srt_path" name="srt_path">
+                            <div id="srt_upload_progress" style="display: none; margin-top: 10px;">
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <div style="flex: 1; height: 20px; background: #ddd; border-radius: 10px; overflow: hidden;">
+                                        <div id="srt_progress_bar" style="height: 100%; background: #333; width: 0%; transition: width 0.3s;"></div>
+                                    </div>
+                                    <span id="srt_progress_text" style="font-size: 12px; color: #666;">0%</span>
+                                </div>
+                                <small id="srt_upload_status" style="color: #666; display: block; margin-top: 5px;"></small>
+                            </div>
                             <small id="srt_path_display" style="color: #666; display: block; margin-top: 5px;">请选择 SRT 字幕文件</small>
                         </div>
 
@@ -515,87 +531,191 @@
             logArea.scrollTop = logArea.scrollHeight;
         }
 
-        // 处理文件选择，尝试获取文件路径
+        // 存储选中的文件内容
+        let selectedAudioFile = null;
+        let selectedSrtFile = null;
+        const CHUNK_SIZE = 2 * 1024 * 1024; // 2MB per chunk
+
+        // 处理文件选择
         function setupFileInputs() {
             const audioInput = document.getElementById('audio');
             const srtInput = document.getElementById('srt');
             const audioPathDisplay = document.getElementById('audio_path_display');
             const srtPathDisplay = document.getElementById('srt_path_display');
 
-            audioInput.addEventListener('change', function(e) {
+            audioInput.addEventListener('change', async function(e) {
                 const file = e.target.files[0];
                 if (file) {
-                    // 尝试获取文件路径（某些浏览器可能支持）
-                    let filePath = '';
-                    
-                    // 尝试从 file 对象获取路径
-                    if (file.path) {
-                        // Electron/Tauri 等框架可能提供 path 属性
-                        filePath = file.path;
-                    } else if (file.webkitRelativePath) {
-                        // 相对路径
-                        filePath = file.webkitRelativePath;
-                    } else {
-                        // 如果无法获取路径，使用文件名
-                        // 后端会尝试从常见路径查找
-                        filePath = file.name;
-                    }
-                    
-                    document.getElementById('audio_path').value = filePath;
-                    audioPathDisplay.textContent = '已选择: ' + file.name + (filePath !== file.name ? ' (路径: ' + filePath + ')' : '');
+                    selectedAudioFile = file;
+                    audioPathDisplay.textContent = '已选择: ' + file.name + ' (' + (file.size / 1024 / 1024).toFixed(2) + ' MB)';
+                    // 重置上传进度
+                    document.getElementById('audio_upload_progress').style.display = 'none';
                 }
             });
 
-            srtInput.addEventListener('change', function(e) {
+            srtInput.addEventListener('change', async function(e) {
                 const file = e.target.files[0];
                 if (file) {
-                    // 尝试获取文件路径
-                    let filePath = '';
-                    
-                    if (file.path) {
-                        filePath = file.path;
-                    } else if (file.webkitRelativePath) {
-                        filePath = file.webkitRelativePath;
-                    } else {
-                        filePath = file.name;
-                    }
-                    
-                    document.getElementById('srt_path').value = filePath;
-                    srtPathDisplay.textContent = '已选择: ' + file.name + (filePath !== file.name ? ' (路径: ' + filePath + ')' : '');
+                    selectedSrtFile = file;
+                    srtPathDisplay.textContent = '已选择: ' + file.name + ' (' + (file.size / 1024).toFixed(2) + ' KB)';
+                    // 重置上传进度
+                    document.getElementById('srt_upload_progress').style.display = 'none';
                 }
             });
+        }
+
+        // 分块上传文件
+        async function uploadFileChunked(file, fileType) {
+            const uploadId = crypto.randomUUID();
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            const progressBar = document.getElementById(fileType + '_progress_bar');
+            const progressText = document.getElementById(fileType + '_progress_text');
+            const uploadStatus = document.getElementById(fileType + '_upload_status');
+            const uploadProgress = document.getElementById(fileType + '_upload_progress');
+            
+            uploadProgress.style.display = 'block';
+            uploadStatus.textContent = `准备上传 ${totalChunks} 个分块...`;
+
+            // 先查询已上传的分块（断点续传）
+            let uploadedChunks = [];
+            try {
+                const checkResponse = await fetch(`/api/upload/check?upload_id=${uploadId}&file_type=${fileType}`);
+                if (checkResponse.ok) {
+                    const checkResult = await checkResponse.json();
+                    uploadedChunks = checkResult.uploaded_chunks || [];
+                    if (uploadedChunks.length > 0) {
+                        uploadStatus.textContent = `检测到已上传 ${uploadedChunks.length} 个分块，继续上传...`;
+                    }
+                }
+            } catch (e) {
+                console.log('无法检查已上传分块，从头开始上传');
+            }
+
+            // 上传所有分块
+            for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
+                // 跳过已上传的分块
+                if (uploadedChunks.includes(chunkIndex)) {
+                    const progress = ((chunkIndex + 1) / totalChunks * 100).toFixed(1);
+                    progressBar.style.width = progress + '%';
+                    progressText.textContent = progress + '%';
+                    continue;
+                }
+
+                const start = chunkIndex * CHUNK_SIZE;
+                const end = Math.min(start + CHUNK_SIZE, file.size);
+                const chunk = file.slice(start, end);
+
+                const formData = new FormData();
+                formData.append('upload_id', uploadId);
+                formData.append('file_type', fileType);
+                formData.append('chunk_index', chunkIndex.toString());
+                formData.append('total_chunks', totalChunks.toString());
+                formData.append('chunk', chunk);
+                formData.append('filename', file.name);
+                formData.append('file_size', file.size.toString());
+
+                let retries = 3;
+                let success = false;
+
+                while (retries > 0 && !success) {
+                    try {
+                        const response = await fetch('/api/upload/chunk', {
+                            method: 'POST',
+                            body: formData
+                        });
+
+                        if (!response.ok) {
+                            throw new Error(`上传失败: ${response.status}`);
+                        }
+
+                        const result = await response.json();
+                        if (result.success) {
+                            success = true;
+                            const progress = ((chunkIndex + 1) / totalChunks * 100).toFixed(1);
+                            progressBar.style.width = progress + '%';
+                            progressText.textContent = progress + '%';
+                            uploadStatus.textContent = `上传中: ${chunkIndex + 1}/${totalChunks} 分块`;
+                        } else {
+                            throw new Error(result.error || '上传失败');
+                        }
+                    } catch (error) {
+                        retries--;
+                        if (retries === 0) {
+                            throw new Error(`分块 ${chunkIndex + 1} 上传失败: ${error.message}`);
+                        }
+                        await new Promise(resolve => setTimeout(resolve, 1000)); // 等待1秒后重试
+                    }
+                }
+            }
+
+            // 合并文件
+            uploadStatus.textContent = '正在合并文件...';
+            const mergeResponse = await fetch('/api/upload/merge', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    upload_id: uploadId,
+                    file_type: fileType,
+                    filename: file.name,
+                    total_chunks: totalChunks
+                })
+            });
+
+            if (!mergeResponse.ok) {
+                throw new Error('合并文件失败');
+            }
+
+            const mergeResult = await mergeResponse.json();
+            if (!mergeResult.success) {
+                throw new Error(mergeResult.error || '合并文件失败');
+            }
+
+            progressBar.style.width = '100%';
+            progressText.textContent = '100%';
+            uploadStatus.textContent = '上传完成';
+            
+            return mergeResult.file_path;
         }
 
         async function startTask() {
             const form = document.getElementById('configForm');
             const formData = new FormData(form);
             
-            // 获取文件路径（从隐藏字段）
-            const audioPath = document.getElementById('audio_path').value;
-            const srtPath = document.getElementById('srt_path').value;
-            
-            if (!audioPath) {
+            if (!selectedAudioFile) {
                 alert('请选择音频文件');
                 return;
             }
             
-            if (!srtPath) {
+            if (!selectedSrtFile) {
                 alert('请选择 SRT 字幕文件');
                 return;
             }
-            
-            const config = {
-                api_url: formData.get('api_url'),
-                audio: audioPath,
-                srt: srtPath,
-                output: formData.get('output'),
-                max_concurrent: parseInt(formData.get('max_concurrent')),
-                split_concurrent: parseInt(formData.get('split_concurrent')),
-                batch_size: parseInt(formData.get('batch_size')),
-                rest_duration: parseInt(formData.get('rest_duration'))
-            };
 
             try {
+                addLog('开始上传文件...', 'info');
+                
+                // 并行上传两个文件
+                const [audioPath, srtPath] = await Promise.all([
+                    uploadFileChunked(selectedAudioFile, 'audio'),
+                    uploadFileChunked(selectedSrtFile, 'srt')
+                ]);
+
+                addLog('文件上传完成，正在启动任务...', 'info');
+
+                // 启动任务
+                const config = {
+                    api_url: formData.get('api_url'),
+                    audio: audioPath,
+                    srt: srtPath,
+                    output: formData.get('output'),
+                    max_concurrent: parseInt(formData.get('max_concurrent')),
+                    split_concurrent: parseInt(formData.get('split_concurrent')),
+                    batch_size: parseInt(formData.get('batch_size')),
+                    rest_duration: parseInt(formData.get('rest_duration'))
+                };
+
                 const response = await fetch('/api/start', {
                     method: 'POST',
                     headers: {
@@ -603,6 +723,11 @@
                     },
                     body: JSON.stringify(config)
                 });
+
+                if (!response.ok) {
+                    const errorText = await response.text();
+                    throw new Error(`服务器错误 (${response.status}): ${errorText}`);
+                }
 
                 const result = await response.json();
                 if (result.success) {
