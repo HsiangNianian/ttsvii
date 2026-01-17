@@ -563,7 +563,7 @@ impl AudioSplitter {
             anyhow::bail!("ffmpeg 合并失败: {}", stderr);
         }
 
-        // 验证最终音频时长是否与原始音频一致
+        // 验证最终音频时长是否与原始音频一致，如果不一致则修正
         let final_probe_output = tokio::process::Command::new("ffprobe")
             .arg("-v")
             .arg("error")
@@ -582,16 +582,159 @@ impl AudioSplitter {
             anyhow::bail!("无法获取最终音频时长: {:?}", output_path);
         };
 
-        // 计算时长差值（允许100毫秒的误差）
-        let duration_diff = (final_duration_sec - original_duration_sec).abs();
-        let tolerance_sec = 0.1; // 100毫秒
+        // 计算时长差值
+        let duration_diff = final_duration_sec - original_duration_sec;
+        let tolerance_sec = 0.05; // 50毫秒
 
-        if duration_diff > tolerance_sec {
+        if duration_diff.abs() > tolerance_sec {
             eprintln!(
-                "警告: 最终音频时长 ({:.3}s) 与原始音频时长 ({:.3}s) 不一致，差值: {:.3}s",
+                "检测到时长不一致: 最终音频 ({:.3}s) vs 原始音频 ({:.3}s), 差值: {:.3}s",
                 final_duration_sec, original_duration_sec, duration_diff
             );
-            // 不报错，只警告，因为可能有小的舍入误差
+            
+            // 如果差值较大，尝试通过调整最后一个空白片段来修正
+            if duration_diff.abs() > 0.1 {
+                eprintln!("尝试修正时长...");
+                
+                // 找到最后一个空白片段的位置
+                if let Some((_, last_silence_path)) = silence_files.iter().find(|(p, _)| *p == srt_entries.len()) {
+                    // 计算需要调整的时长（负值表示需要缩短，正值表示需要延长）
+                    let adjustment_sec = -duration_diff;
+                    
+                    // 获取当前最后一个空白片段的时长
+                    let last_silence_probe = tokio::process::Command::new("ffprobe")
+                        .arg("-v")
+                        .arg("error")
+                        .arg("-show_entries")
+                        .arg("format=duration")
+                        .arg("-of")
+                        .arg("default=noprint_wrappers=1:nokey=1")
+                        .arg(last_silence_path)
+                        .output()
+                        .await?;
+                    
+                    if last_silence_probe.status.success() {
+                        let current_duration_str = String::from_utf8_lossy(&last_silence_probe.stdout);
+                        if let Ok(current_duration_sec) = current_duration_str.trim().parse::<f64>() {
+                            let new_duration_sec = current_duration_sec + adjustment_sec;
+                            
+                            // 确保新时长不为负
+                            if new_duration_sec > 0.0 {
+                                eprintln!("调整最后一个空白片段: {:.3}s -> {:.3}s", current_duration_sec, new_duration_sec);
+                                
+                                // 重新生成最后一个空白片段
+                                let adjusted_silence_file = temp_dir.path().join("silence_end_adjusted.wav");
+                                Self::generate_silence(&adjusted_silence_file, new_duration_sec).await?;
+                                
+                                // 重新构建文件列表，使用调整后的空白片段
+                                let mut adjusted_file_list_content = String::new();
+                                
+                                // 添加起始空白
+                                if let Some((_, path)) = silence_files.iter().find(|(p, _)| *p == 0) {
+                                    let abs_path = if path.exists() {
+                                        std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
+                                    } else {
+                                        path.clone()
+                                    };
+                                    let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+                                    adjusted_file_list_content.push_str(&format!("file '{}'\n", escaped_path));
+                                }
+                                
+                                // 添加音频片段和中间空白
+                                for (i, processed_file) in processed_files.iter().enumerate() {
+                                    let abs_path = if processed_file.exists() {
+                                        std::fs::canonicalize(processed_file).unwrap_or_else(|_| processed_file.clone())
+                                    } else {
+                                        processed_file.clone()
+                                    };
+                                    let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+                                    adjusted_file_list_content.push_str(&format!("file '{}'\n", escaped_path));
+                                    
+                                    // 在当前位置之后添加空白
+                                    if let Some((_, path)) = silence_files.iter().find(|(p, _)| *p == i + 1) {
+                                        let abs_path = if path.exists() {
+                                            std::fs::canonicalize(path).unwrap_or_else(|_| path.clone())
+                                        } else {
+                                            path.clone()
+                                        };
+                                        let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+                                        adjusted_file_list_content.push_str(&format!("file '{}'\n", escaped_path));
+                                    }
+                                }
+                                
+                                // 添加调整后的末尾空白
+                                let abs_path = if adjusted_silence_file.exists() {
+                                    std::fs::canonicalize(&adjusted_silence_file).unwrap_or_else(|_| adjusted_silence_file.clone())
+                                } else {
+                                    adjusted_silence_file.clone()
+                                };
+                                let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+                                adjusted_file_list_content.push_str(&format!("file '{}'\n", escaped_path));
+                                
+                                // 重新合并
+                                let adjusted_file_list_path = temp_dir.path().join("file_list_adjusted.txt");
+                                tokio::fs::write(&adjusted_file_list_path, adjusted_file_list_content).await?;
+                                
+                                let adjusted_output = tokio::process::Command::new("ffmpeg")
+                                    .arg("-loglevel")
+                                    .arg("error")
+                                    .arg("-f")
+                                    .arg("concat")
+                                    .arg("-safe")
+                                    .arg("0")
+                                    .arg("-i")
+                                    .arg(&adjusted_file_list_path)
+                                    .arg("-acodec")
+                                    .arg("pcm_s16le")
+                                    .arg("-ar")
+                                    .arg("44100")
+                                    .arg("-ac")
+                                    .arg("2")
+                                    .arg("-y")
+                                    .arg(output_path)
+                                    .output()
+                                    .await
+                                    .context("执行 ffmpeg 修正合并失败")?;
+
+                                if adjusted_output.status.success() {
+                                    // 验证修正后的时长
+                                    let corrected_probe_output = tokio::process::Command::new("ffprobe")
+                                        .arg("-v")
+                                        .arg("error")
+                                        .arg("-show_entries")
+                                        .arg("format=duration")
+                                        .arg("-of")
+                                        .arg("default=noprint_wrappers=1:nokey=1")
+                                        .arg(output_path)
+                                        .output()
+                                        .await?;
+
+                                    if corrected_probe_output.status.success() {
+                                        let corrected_duration_str = String::from_utf8_lossy(&corrected_probe_output.stdout);
+                                        if let Ok(corrected_duration_sec) = corrected_duration_str.trim().parse::<f64>() {
+                                            let final_diff = (corrected_duration_sec - original_duration_sec).abs();
+                                            if final_diff <= tolerance_sec {
+                                                eprintln!("✅ 时长修正成功: {:.3}s (差值: {:.3}s)", corrected_duration_sec, final_diff);
+                                            } else {
+                                                eprintln!("⚠️  时长修正后仍有误差: {:.3}s vs {:.3}s (差值: {:.3}s)", corrected_duration_sec, original_duration_sec, final_diff);
+                                            }
+                                        }
+                                    }
+                                } else {
+                                    let stderr = String::from_utf8_lossy(&adjusted_output.stderr);
+                                    eprintln!("警告: 修正合并失败: {}", stderr);
+                                }
+                            } else {
+                                eprintln!("警告: 无法修正（空白片段时长将变为负数）");
+                            }
+                        }
+                    }
+                } else {
+                    eprintln!("警告: 未找到末尾空白片段，无法修正时长");
+                }
+            }
+        } else {
+            eprintln!("✅ 时长验证通过: {:.3}s (差值: {:.3}s)", final_duration_sec, duration_diff);
         }
 
         Ok(())
