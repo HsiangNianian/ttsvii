@@ -123,16 +123,16 @@ impl TaskManager {
                 async move {
                     let output_dir = speaker_path.parent().unwrap();
 
-                    // 直接切分音频片段到 speaker 路径
+                    // 切分音频片段到临时文件
                     let temp_path =
                         AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
                             .await?;
 
-                    // 复制到 emotion 路径（使用相同的音频片段）
+                    // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
                     tokio::fs::copy(&temp_path, &speaker_path).await?;
                     tokio::fs::copy(&temp_path, &emotion_path).await?;
 
-                    // 删除临时文件
+                    // 删除临时切分文件（speaker 和 emotion 文件保留在 tmp 目录，任务完成后统一删除）
                     let _ = tokio::fs::remove_file(&temp_path).await;
 
                     Ok::<(), anyhow::Error>(())
