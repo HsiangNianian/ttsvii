@@ -1,0 +1,24 @@
+[package]
+name = "ttsvii"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.35", features = ["full"] }
+reqwest = { version = "0.11", features = ["multipart", "json"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+anyhow = "1.0"
+clap = { version = "4.4", features = ["derive"] }
+regex = "1.10"
+futures = "0.3"
+rayon = "1.8"
+tempfile = "3.8"
+chrono = "0.4"
+indicatif = "0.17"
+base64 = "0.21"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

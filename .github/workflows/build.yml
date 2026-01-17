@@ -1,0 +1,97 @@
+name: Build
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build Release
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Linux
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: ttsvii-linux-x86_64
+            bin_name: ttsvii
+          - os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact_name: ttsvii-linux-aarch64
+            bin_name: ttsvii
+            use-cross: true
+          # Windows
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: ttsvii-windows-x86_64
+            bin_name: ttsvii.exe
+          # macOS
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            artifact_name: ttsvii-macos-x86_64
+            bin_name: ttsvii
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            artifact_name: ttsvii-macos-aarch64
+            bin_name: ttsvii
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      
+      - name: Install cross (if needed)
+        if: matrix.use-cross
+        uses: cross-rs/cross@v1
+        with:
+          version: 'v1.4.0'
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.target }}-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.target }}-
+      
+      - name: Build release
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+        env:
+          CARGO_NET_GIT_FETCH_WITH_CLI: true
+      
+      - name: Prepare release
+        shell: bash
+        run: |
+          mkdir -p release
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} release/
+          else
+            cp target/${{ matrix.target }}/release/${{ matrix.bin_name }} release/
+          fi
+      
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact_name }}
+          path: release/
+          retention-days: 7
