@@ -9,8 +9,9 @@ pub struct ApiClient {
 
 impl ApiClient {
     pub fn new(base_url: String) -> Self {
+        // 移除超时限制，允许 API 长时间处理
+        // 不设置 timeout，使用默认行为（无限等待）
         let client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(300))
             .build()
             .expect("创建 HTTP 客户端失败");
 
@@ -78,14 +79,14 @@ impl ApiClient {
             form = form.part("emotion_audio", part);
         }
 
-        // 使用超时包装请求，避免请求无限期等待
-        let response = tokio::time::timeout(
-            std::time::Duration::from_secs(600), // 10 分钟超时
-            self.client.post(&url).multipart(form).send(),
-        )
-        .await
-        .context("API 请求超时（超过 10 分钟）")?
-        .context("发送 API 请求失败")?;
+        // 移除超时限制，允许 API 长时间处理
+        let response = self
+            .client
+            .post(&url)
+            .multipart(form)
+            .send()
+            .await
+            .context("发送 API 请求失败")?;
 
         if !response.status().is_success() {
             let status = response.status();

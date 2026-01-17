@@ -632,21 +632,23 @@ impl AppState {
 }
 
 pub async fn create_router() -> Router {
-    use tower::ServiceBuilder;
-    use tower_http::limit::RequestBodyLimitLayer;
-    use axum::response::Response;
     use axum::body::Body;
     use axum::http::{header, StatusCode};
+    use axum::response::Response;
     use std::path::Path;
+    use tower::ServiceBuilder;
+    use tower_http::limit::RequestBodyLimitLayer;
 
     let state = AppState::new();
 
     // 静态文件服务处理器（用于提供音频文件）
-    async fn serve_audio_file(path: axum::extract::Path<String>) -> Result<Response<Body>, StatusCode> {
+    async fn serve_audio_file(
+        path: axum::extract::Path<String>,
+    ) -> Result<Response<Body>, StatusCode> {
         // 移除开头的 ./ 或 /
         let file_path = path.trim_start_matches("./").trim_start_matches("/");
         let path_buf = Path::new(file_path);
-        
+
         // 安全检查：只允许访问 output 目录下的文件
         if !path_buf.starts_with("output/") {
             return Err(StatusCode::FORBIDDEN);

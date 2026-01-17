@@ -228,22 +228,14 @@ async fn run_cli_mode(
                 batch_end
             );
 
-            // 执行当前批次（给每个任务添加总体超时保护，防止卡住）
+            // 执行当前批次（移除超时限制，允许 API 长时间处理）
             let futures: Vec<_> = batch_tasks
                 .iter()
                 .map(|task| {
                     let task = task.clone();
                     let executor = executor.clone();
                     async move {
-                        // 给整个任务添加 15 分钟超时（比内部 API 调用的 10 分钟超时稍长）
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(900), // 15 分钟
-                            executor.execute_task(task),
-                        )
-                        .await
-                        .unwrap_or_else(|_| {
-                            Err(anyhow::anyhow!("任务执行超时（超过 15 分钟）"))
-                        })
+                        executor.execute_task(task).await
                     }
                 })
                 .collect();

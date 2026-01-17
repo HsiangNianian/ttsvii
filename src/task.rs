@@ -116,20 +116,18 @@ impl TaskExecutor {
             );
         }
 
-        // 调用 API 合成音频（添加超时保护）
-        let audio_data = tokio::time::timeout(
-            std::time::Duration::from_secs(600), // 10 分钟超时
-            self.api_client.synthesize(
+        // 调用 API 合成音频（移除超时限制，允许 API 长时间处理）
+        let audio_data = self
+            .api_client
+            .synthesize(
                 text,
                 Some(&task.speaker_audio),
                 Some(&task.emotion_audio),
                 None,
                 None,
                 None,
-            ),
-        )
-        .await
-        .context("API 调用超时（超过 10 分钟）")??;
+            )
+            .await?;
 
         // 验证返回的音频数据
         if audio_data.is_empty() {
