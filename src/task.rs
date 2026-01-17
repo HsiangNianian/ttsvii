@@ -48,11 +48,27 @@ impl TaskExecutor {
     }
 
     async fn execute_inner(&self, task: &Task) -> Result<()> {
+        // 验证输入：跳过空文本
+        let text = task.entry.text.trim();
+        if text.is_empty() {
+            anyhow::bail!("文本内容为空，跳过此任务");
+        }
+
+        // 验证音频文件是否存在且有效
+        if !task.speaker_audio.exists() {
+            anyhow::bail!("音频文件不存在: {:?}", task.speaker_audio);
+        }
+
+        let speaker_size = tokio::fs::metadata(&task.speaker_audio).await?.len();
+        if speaker_size == 0 {
+            anyhow::bail!("音频文件为空: {:?}", task.speaker_audio);
+        }
+
         // 调用 API 合成音频
         let audio_data = self
             .api_client
             .synthesize(
-                &task.entry.text,
+                text,
                 Some(&task.speaker_audio),
                 Some(&task.emotion_audio),
                 None,
@@ -60,6 +76,11 @@ impl TaskExecutor {
                 None,
             )
             .await?;
+
+        // 验证返回的音频数据
+        if audio_data.is_empty() {
+            anyhow::bail!("API 返回的音频数据为空");
+        }
 
         // 保存合成的音频
         tokio::fs::write(&task.output_path, audio_data).await?;
@@ -88,8 +109,15 @@ impl TaskManager {
         output_dir: &Path,
     ) -> Result<Self> {
         let mut tasks = Vec::new();
+        let mut skipped = 0;
 
         for entry in srt_entries {
+            // 跳过空文本的条目
+            if entry.text.trim().is_empty() {
+                skipped += 1;
+                continue;
+            }
+
             // 切分的音频文件放到临时目录
             let speaker_audio = tmp_dir.join(format!("speaker_{}.wav", entry.index));
             let emotion_audio = tmp_dir.join(format!("emotion_{}.wav", entry.index));
@@ -102,6 +130,10 @@ impl TaskManager {
                 emotion_audio,
                 output_path,
             });
+        }
+
+        if skipped > 0 {
+            println!("跳过 {} 个空文本条目", skipped);
         }
 
         Ok(Self { tasks })

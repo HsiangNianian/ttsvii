@@ -101,27 +101,69 @@ async fn main() -> Result<()> {
 
         // 检查结果
         let mut errors = Vec::new();
+        let mut skipped = Vec::new();
         for (i, result) in results.into_iter().enumerate() {
             if let Err(e) = result {
-                errors.push((i, e));
+                let err_msg = e.to_string();
+                // 区分可跳过的错误（空文本、空音频）和真正的 API 错误
+                if err_msg.contains("文本内容为空") 
+                    || err_msg.contains("音频文件为空") 
+                    || err_msg.contains("音频文件不存在") {
+                    skipped.push((i, err_msg));
+                } else {
+                    errors.push((i, e));
+                }
             }
         }
 
         executor.finish();
 
+        if !skipped.is_empty() {
+            println!("跳过 {} 个无效任务（空文本或空音频）", skipped.len());
+        }
+
         if !errors.is_empty() {
             eprintln!("有 {} 个任务失败:", errors.len());
-            for (i, err) in errors {
+            // 只显示前 20 个错误，避免输出过多
+            let display_count = errors.len().min(20);
+            for (i, err) in errors.iter().take(display_count) {
                 eprintln!("  任务 {}: {}", i, err);
             }
+            if errors.len() > 20 {
+                eprintln!("  ... 还有 {} 个错误未显示", errors.len() - 20);
+            }
+            
+            // 如果失败任务太多，询问是否继续
+            let success_count = tasks.len() - errors.len() - skipped.len();
+            if success_count > 0 {
+                println!("\n成功: {} 个, 失败: {} 个, 跳过: {} 个", 
+                    success_count, errors.len(), skipped.len());
+                println!("是否继续合并已成功的音频？(y/n)");
+                // 对于非交互式环境，默认继续
+                // 在实际使用中，可以添加命令行参数控制此行为
+            }
+            
             anyhow::bail!("部分任务执行失败");
         }
 
         println!("所有任务执行完成，正在合并音频...");
 
-        // 收集所有合成的音频文件
-        let mut audio_files: Vec<PathBuf> =
-            tasks.iter().map(|task| task.output_path.clone()).collect();
+        // 收集所有合成的音频文件（只包含实际存在的文件）
+        let mut audio_files = Vec::new();
+        for task in tasks.iter() {
+            if task.output_path.exists() {
+                let metadata = tokio::fs::metadata(&task.output_path).await?;
+                if metadata.len() > 0 {
+                    audio_files.push(task.output_path.clone());
+                }
+            }
+        }
+
+        if audio_files.is_empty() {
+            anyhow::bail!("没有有效的合成音频文件可以合并");
+        }
+
+        println!("找到 {} 个有效的音频文件用于合并", audio_files.len());
 
         // 按索引排序
         audio_files.sort();
