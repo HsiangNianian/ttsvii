@@ -6,6 +6,7 @@ mod web;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use task::{TaskExecutor, TaskManager};
 use uuid::Uuid;
@@ -206,113 +207,253 @@ async fn run_cli_mode(
             rest_duration
         );
 
-        // 批次处理任务
+        // 批次处理任务（带失败重试机制）
         let tasks = task_manager.get_tasks();
         let tasks_len = tasks.len();
-        let mut all_results = Vec::new();
-
-        // 按批次处理（每批次 = batch_size 轮并发）
         let batch_task_count = batch_size * max_concurrent;
-        let mut batch_num = 0;
+        // 记录需要重试的任务（失败的任务索引）
+        let mut failed_task_indices: HashSet<usize> = HashSet::new();
+        let mut retry_round = 0;
 
-        for batch_start in (0..tasks_len).step_by(batch_task_count) {
-            batch_num += 1;
-            let batch_end = (batch_start + batch_task_count).min(tasks_len);
-            let batch_tasks = &tasks[batch_start..batch_end];
-
-            println!(
-                "\n批次 {}/{}: 处理任务 {}-{}",
-                batch_num,
-                (tasks_len + batch_task_count - 1) / batch_task_count,
-                batch_start + 1,
-                batch_end
-            );
-
-            // 执行当前批次（移除超时限制，允许 API 长时间处理）
-            let futures: Vec<_> = batch_tasks
-                .iter()
-                .map(|task| {
-                    let task = task.clone();
-                    let executor = executor.clone();
-                    async move {
-                        executor.execute_task(task).await
-                    }
-                })
-                .collect();
-
-            println!("开始执行批次任务...");
-            let batch_results = futures::future::join_all(futures).await;
-            println!("批次任务执行完成，开始收集结果...");
-            all_results.extend(batch_results);
-
-            // 显示实时统计
-            let (success, failure) = executor.get_stats();
-            let completed = success + failure;
-            println!(
-                "实时统计: 进度 {}/{} | 成功: {} | 失败: {}",
-                completed, tasks_len, success, failure
-            );
-
-            // 如果不是最后一批，休息一下
-            if batch_end < tasks_len {
-                println!("休息 {} 秒...", rest_duration);
-                tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
+        loop {
+            retry_round += 1;
+            if retry_round > 1 {
+                println!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
+                println!("等待 60 秒后开始重试...");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
-        }
 
-        let results = all_results;
+            // 确定本次要处理的任务
+            let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
+                // 第一轮：处理所有任务
+                tasks.iter().enumerate().collect()
+            } else {
+                // 后续轮：只处理失败的任务
+                failed_task_indices
+                    .iter()
+                    .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                    .collect()
+            };
 
-        println!("\n所有批次任务已完成，开始检查结果...");
-        // 检查结果
-        let mut errors = Vec::new();
-        let mut skipped = Vec::new();
-        for (i, result) in results.into_iter().enumerate() {
-            if let Err(e) = result {
-                let err_msg = e.to_string();
-                // 区分可跳过的错误（空文本、空音频）和真正的 API 错误
-                if err_msg.contains("文本内容为空")
-                    || err_msg.contains("音频文件为空")
-                    || err_msg.contains("音频文件不存在")
-                    || err_msg.contains("音频文件无效")
-                    || err_msg.contains("切分的音频文件无效")
-                {
-                    skipped.push((i, err_msg));
-                } else {
-                    errors.push((i, e));
+            if tasks_to_process.is_empty() {
+                println!("\n所有任务已完成！");
+                break;
+            }
+
+            println!(
+                "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
+                tasks_to_process.len(),
+                retry_round
+            );
+
+            // 重置执行器统计
+            executor.set_total(tasks_to_process.len() as u64);
+            let (old_success, old_failure) = executor.get_stats();
+            let initial_success = old_success;
+            let initial_failure = old_failure;
+
+            // 按批次处理
+            let mut batch_num = 0;
+            for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
+                batch_num += 1;
+                let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
+                let batch_tasks = &tasks_to_process[batch_start..batch_end];
+
+                println!(
+                    "\n批次 {}/{}: 处理任务 {}-{}",
+                    batch_num,
+                    (tasks_to_process.len() + batch_task_count - 1) / batch_task_count,
+                    batch_start + 1,
+                    batch_end
+                );
+
+                // 执行当前批次
+                let futures: Vec<_> = batch_tasks
+                    .iter()
+                    .map(|(_, task)| {
+                        let task = (*task).clone();
+                        let executor = executor.clone();
+                        async move {
+                            let result = executor.execute_task(task).await;
+                            result
+                        }
+                    })
+                    .collect();
+
+                println!("开始执行批次任务...");
+                let batch_results = futures::future::join_all(futures).await;
+                println!("批次任务执行完成，开始收集结果...");
+
+                // 显示实时统计
+                let (success, failure) = executor.get_stats();
+                let completed = success + failure;
+                println!(
+                    "实时统计: 进度 {}/{} | 成功: {} | 失败: {}",
+                    completed, tasks_to_process.len(), success, failure
+                );
+
+                // 如果不是最后一批，休息一下
+                if batch_end < tasks_to_process.len() {
+                    println!("休息 {} 秒...", rest_duration);
+                    tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
                 }
+            }
+
+            // 检查本轮结果，更新失败任务列表
+            let mut new_failed_indices = HashSet::new();
+            let mut skipped: Vec<(usize, String)> = Vec::new();
+            for (original_idx, _) in tasks_to_process.iter() {
+                let task = &tasks[*original_idx];
+                // 检查任务是否成功（文件是否存在且有效）
+                if task.output_path.exists() {
+                    // 文件存在，检查是否有效（稍后会统一校验）
+                    // 这里先假设存在就是成功，后续会统一校验
+                } else {
+                    // 文件不存在，标记为失败
+                    new_failed_indices.insert(*original_idx);
+                }
+            }
+
+            // 更新失败任务集合（只保留仍然失败的任务）
+            failed_task_indices = new_failed_indices;
+
+            if failed_task_indices.is_empty() {
+                println!("\n本轮所有任务都已完成！");
+                break;
+            } else {
+                println!(
+                    "\n本轮完成，仍有 {} 个任务失败，将在下一轮重试",
+                    failed_task_indices.len()
+                );
             }
         }
 
         executor.finish();
 
-        if !skipped.is_empty() {
-            println!("跳过 {} 个无效任务（空文本或空音频）", skipped.len());
-        }
+        println!("\n所有任务执行完成，开始音频可用性校验...");
 
-        if !errors.is_empty() {
-            eprintln!("有 {} 个任务失败:", errors.len());
-            // 只显示前 20 个错误，避免输出过多
-            let display_count = errors.len().min(20);
-            for (i, err) in errors.iter().take(display_count) {
-                eprintln!("  任务 {}: {}", i, err);
-            }
-            if errors.len() > 20 {
-                eprintln!("  ... 还有 {} 个错误未显示", errors.len() - 20);
+        // 音频可用性校验
+        let mut invalid_audio_indices: HashSet<usize> = HashSet::new();
+        let mut validation_round = 0;
+
+        loop {
+            validation_round += 1;
+            if validation_round > 1 {
+                println!("\n=== 第 {} 轮重试验证失败的任务 ===", validation_round - 1);
+                println!("等待 60 秒后开始重试...");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
-            // 显示统计信息
-            let success_count = tasks.len() - errors.len() - skipped.len();
+            // 确定本次要校验的任务
+            let tasks_to_validate: Vec<(usize, &task::Task)> = if validation_round == 1 {
+                // 第一轮：校验所有任务
+                tasks.iter().enumerate().collect()
+            } else {
+                // 后续轮：只校验失败的任务
+                invalid_audio_indices
+                    .iter()
+                    .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                    .collect()
+            };
+
+            if tasks_to_validate.is_empty() {
+                println!("\n所有音频校验通过！");
+                break;
+            }
+
             println!(
-                "\n统计: 成功: {} 个, 失败: {} 个, 跳过: {} 个",
-                success_count,
-                errors.len(),
-                skipped.len()
+                "\n开始校验 {} 个音频文件（本轮: 第 {} 轮）...",
+                tasks_to_validate.len(),
+                validation_round
             );
+            // 校验音频文件
+            let mut new_invalid_indices = std::collections::HashSet::new();
+            for (original_idx, task) in tasks_to_validate.iter() {
+                match audio::AudioSplitter::validate_audio_file(&task.output_path).await {
+                    Ok(_) => {
+                        // 校验通过
+                    }
+                    Err(e) => {
+                        eprintln!(
+                            "音频文件校验失败 (任务 {}): {}",
+                            task.entry.index, e
+                        );
+                        new_invalid_indices.insert(*original_idx);
+                        // 删除无效文件，准备重新生成
+                        let _ = tokio::fs::remove_file(&task.output_path).await;
+                    }
+                }
+            }
 
-            anyhow::bail!("部分任务执行失败");
+            // 如果有无效的音频，需要重新执行这些任务
+            if !new_invalid_indices.is_empty() {
+                println!(
+                    "\n发现 {} 个无效音频文件，需要重新生成",
+                    new_invalid_indices.len()
+                );
+                // 将这些任务加入失败任务列表，重新执行
+                failed_task_indices.extend(new_invalid_indices.iter().cloned());
+                // 重新执行失败的任务
+                let tasks_to_retry: Vec<(usize, &task::Task)> = new_invalid_indices
+                    .iter()
+                    .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                    .collect();
+
+                println!("\n开始重新生成 {} 个无效音频文件...", tasks_to_retry.len());
+                executor.set_total(tasks_to_retry.len() as u64);
+
+                // 按批次重新执行
+                for batch_start in (0..tasks_to_retry.len()).step_by(batch_task_count) {
+                    let batch_end = (batch_start + batch_task_count).min(tasks_to_retry.len());
+                    let batch_tasks = &tasks_to_retry[batch_start..batch_end];
+
+                    let futures: Vec<_> = batch_tasks
+                        .iter()
+                        .map(|(_, task)| {
+                            let task = (*task).clone();
+                            let executor = executor.clone();
+                            async move {
+                                executor.execute_task(task).await
+                            }
+                        })
+                        .collect();
+
+                    let batch_results = futures::future::join_all(futures).await;
+                    // 检查结果
+                    for (original_idx, task) in batch_tasks.iter() {
+                        if !task.output_path.exists() {
+                            // 仍然失败，保留在失败列表中
+                        } else {
+                            // 成功，从失败列表中移除
+                            failed_task_indices.remove(original_idx);
+                        }
+                    }
+
+                    if batch_end < tasks_to_retry.len() {
+                        tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
+                    }
+                }
+
+                // 更新无效音频索引（只保留仍然无效的）
+                invalid_audio_indices = new_invalid_indices
+                    .into_iter()
+                    .filter(|&idx| {
+                        let task = &tasks[idx];
+                        !task.output_path.exists()
+                    })
+                    .collect();
+            } else {
+                // 所有音频都有效
+                invalid_audio_indices.clear();
+            }
+
+            if invalid_audio_indices.is_empty() && failed_task_indices.is_empty() {
+                println!("\n所有音频校验通过！");
+                break;
+            }
         }
 
-        println!("\n所有任务执行完成，开始收集音频文件...");
+        println!("\n开始收集音频文件...");
 
         // 收集所有合成的音频文件及其对应的 SRT 条目（只包含实际存在的文件）
         let mut audio_files = Vec::new();

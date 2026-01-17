@@ -533,6 +533,61 @@ impl AudioSplitter {
         Ok(())
     }
 
+    /// 检查音频文件是否有效（存在、有内容、有时长）
+    pub async fn validate_audio_file(audio_path: &Path) -> Result<()> {
+        // 检查文件是否存在
+        if !audio_path.exists() {
+            anyhow::bail!("音频文件不存在: {:?}", audio_path);
+        }
+
+        // 检查文件大小
+        let metadata = tokio::fs::metadata(audio_path).await?;
+        if metadata.len() == 0 {
+            anyhow::bail!("音频文件为空: {:?}", audio_path);
+        }
+        if metadata.len() <= 44 {
+            anyhow::bail!(
+                "音频文件无效（文件大小: {} 字节，可能只有文件头）: {:?}",
+                metadata.len(),
+                audio_path
+            );
+        }
+
+        // 使用 ffprobe 检查音频时长
+        let probe_output = tokio::process::Command::new("ffprobe")
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=noprint_wrappers=1:nokey=1")
+            .arg(audio_path)
+            .output()
+            .await
+            .context("执行 ffprobe 失败")?;
+
+        if !probe_output.status.success() {
+            let stderr = String::from_utf8_lossy(&probe_output.stderr);
+            anyhow::bail!("ffprobe 检查音频失败: {}", stderr);
+        }
+
+        let duration_str = String::from_utf8_lossy(&probe_output.stdout);
+        let duration = duration_str
+            .trim()
+            .parse::<f64>()
+            .context("无法解析音频时长")?;
+
+        if duration <= 0.0 {
+            anyhow::bail!("音频时长为 0 或无效: {:?}", audio_path);
+        }
+
+        if duration < 0.01 {
+            anyhow::bail!("音频时长太短（小于 0.01 秒），可能无效: {:?}", audio_path);
+        }
+
+        Ok(())
+    }
+
     /// 检查 ffmpeg 是否可用
     pub async fn check_ffmpeg() -> Result<()> {
         let output = tokio::process::Command::new("ffmpeg")
