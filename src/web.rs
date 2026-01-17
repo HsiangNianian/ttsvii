@@ -17,6 +17,10 @@ use tokio::sync::{broadcast, RwLock};
 use tower_http::cors::CorsLayer;
 use uuid::Uuid;
 
+fn default_retry_count() -> u32 {
+    3
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskConfig {
     pub api_url: String,
@@ -37,6 +41,8 @@ pub struct TaskConfig {
     pub split_concurrent: usize,
     pub batch_size: usize,
     pub rest_duration: u64,
+    #[serde(default = "default_retry_count")]
+    pub retry_count: u32,
     #[serde(default)]
     pub extra_args: Vec<String>,
 }
@@ -228,7 +234,11 @@ impl AppState {
                 let api_client = Arc::new(api::ApiClient::new(config.api_url.clone()));
 
                 // 创建任务执行器
-                let executor = Arc::new(TaskExecutor::new(api_client, config.max_concurrent));
+                let executor = Arc::new(TaskExecutor::new(
+                    api_client,
+                    config.max_concurrent,
+                    config.retry_count,
+                ));
                 executor.set_total(task_manager.len() as u64);
 
                 let tasks = task_manager.get_tasks();

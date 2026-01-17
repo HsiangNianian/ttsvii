@@ -22,10 +22,11 @@ pub struct TaskExecutor {
     progress: Arc<ProgressBar>,
     success_count: Arc<std::sync::atomic::AtomicU64>,
     failure_count: Arc<std::sync::atomic::AtomicU64>,
+    retry_count: u32,
 }
 
 impl TaskExecutor {
-    pub fn new(api_client: Arc<ApiClient>, max_concurrent: usize) -> Self {
+    pub fn new(api_client: Arc<ApiClient>, max_concurrent: usize, retry_count: u32) -> Self {
         let progress = ProgressBar::new(0);
         progress.set_style(
             ProgressStyle::default_bar()
@@ -40,27 +41,47 @@ impl TaskExecutor {
             progress: Arc::new(progress),
             success_count: Arc::new(AtomicU64::new(0)),
             failure_count: Arc::new(AtomicU64::new(0)),
+            retry_count,
         }
     }
 
     pub async fn execute_task(&self, task: Task) -> Result<()> {
         let _permit = self.semaphore.acquire().await.unwrap();
 
-        // 执行任务（内部已经有超时保护）
-        let result = self.execute_inner(&task).await;
+        // 执行任务（带重试逻辑）
+        let mut last_error = None;
+        let max_attempts = self.retry_count + 1; // 初始尝试 + 重试次数
 
-        // 更新统计
-        match &result {
-            Ok(_) => {
-                self.success_count.fetch_add(1, Ordering::Relaxed);
-            }
-            Err(_) => {
-                self.failure_count.fetch_add(1, Ordering::Relaxed);
+        for attempt in 1..=max_attempts {
+            let result = self.execute_inner(&task).await;
+
+            match result {
+                Ok(_) => {
+                    // 成功，更新统计并返回
+                    self.success_count.fetch_add(1, Ordering::Relaxed);
+                    self.progress.inc(1);
+                    return Ok(());
+                }
+                Err(e) => {
+                    last_error = Some(e);
+
+                    // 如果不是最后一次尝试，等待后重试
+                    if attempt < max_attempts {
+                        // 指数退避：1秒、2秒、4秒、8秒、16秒、32秒（最多）
+                        let delay_ms = 1000 * (1 << (attempt - 1).min(5));
+                        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                        continue;
+                    }
+                    // 最后一次尝试也失败，跳出循环
+                    break;
+                }
             }
         }
 
+        // 所有尝试都失败，标记为失败
+        self.failure_count.fetch_add(1, Ordering::Relaxed);
         self.progress.inc(1);
-        result
+        Err(last_error.expect("应该有错误信息"))
     }
 
     pub fn get_stats(&self) -> (u64, u64) {

@@ -1,3 +1,4 @@
+use crate::srt::SrtEntry;
 use anyhow::{Context, Result};
 use chrono::Duration;
 use std::path::{Path, PathBuf};
@@ -151,13 +152,210 @@ impl AudioSplitter {
 
         let mut file_list_content = String::new();
         for file in audio_files {
-            file_list_content.push_str(&format!("file '{}'\n", file.display()));
+            // 使用绝对路径，确保 ffmpeg 能找到文件
+            // 如果文件不存在或无法规范化，使用原始路径
+            let abs_path = if file.exists() {
+                std::fs::canonicalize(file).unwrap_or_else(|_| file.clone())
+            } else {
+                // 如果文件不存在，尝试使用绝对路径
+                file.canonicalize().unwrap_or_else(|_| {
+                    // 如果还是失败，使用原始路径（可能是相对路径）
+                    file.clone()
+                })
+            };
+            // 转义单引号，防止路径中包含单引号导致问题
+            let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+            file_list_content.push_str(&format!("file '{}'\n", escaped_path));
         }
 
         tokio::fs::write(&file_list_path, file_list_content).await?;
 
         // 使用 ffmpeg concat 合并
         let output = tokio::process::Command::new("ffmpeg")
+            .arg("-loglevel")
+            .arg("error") // 只显示错误，减少输出
+            .arg("-f")
+            .arg("concat")
+            .arg("-safe")
+            .arg("0")
+            .arg("-i")
+            .arg(&file_list_path)
+            .arg("-c")
+            .arg("copy")
+            .arg("-y")
+            .arg(output_path)
+            .output()
+            .await
+            .context("执行 ffmpeg 合并失败")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("ffmpeg 合并失败: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    /// 合并音频并根据 SRT 时间戳调整速度
+    /// audio_files: 音频文件路径列表（已按索引排序）
+    /// srt_entries: SRT 条目列表（已按索引排序）
+    /// output_path: 输出文件路径
+    pub async fn merge_audio_with_timing(
+        audio_files: &[PathBuf],
+        srt_entries: &[SrtEntry],
+        output_path: &Path,
+    ) -> Result<()> {
+        if audio_files.len() != srt_entries.len() {
+            anyhow::bail!(
+                "音频文件数量 ({}) 与 SRT 条目数量 ({}) 不匹配",
+                audio_files.len(),
+                srt_entries.len()
+            );
+        }
+
+        let temp_dir = TempDir::new()?;
+        let mut processed_files = Vec::new();
+
+        // 创建进度条
+        let progress = ProgressBar::new(audio_files.len() as u64);
+        progress.set_style(
+            ProgressStyle::default_bar()
+                .template("{spinner:.green} [{elapsed_precise}] [{wide_bar:.cyan/blue}] {pos}/{len} 调整速度 ({eta})")
+                .unwrap()
+                .progress_chars("#>-"),
+        );
+
+        // 处理每个音频文件，根据 SRT 时间戳调整速度
+        for (i, (audio_file, entry)) in audio_files.iter().zip(srt_entries.iter()).enumerate() {
+            progress.set_message(format!("处理文件 {}/{}", i + 1, audio_files.len()));
+            // 计算目标时长（从 SRT 时间戳）
+            let target_duration_ms = (entry.end_time - entry.start_time).num_milliseconds();
+            let target_duration_sec = target_duration_ms as f64 / 1000.0;
+
+            // 获取音频文件的实际时长
+            let probe_output = tokio::process::Command::new("ffprobe")
+                .arg("-v")
+                .arg("error")
+                .arg("-show_entries")
+                .arg("format=duration")
+                .arg("-of")
+                .arg("default=noprint_wrappers=1:nokey=1")
+                .arg(audio_file)
+                .output()
+                .await?;
+
+            let actual_duration_sec = if probe_output.status.success() {
+                let duration_str = String::from_utf8_lossy(&probe_output.stdout);
+                duration_str.trim().parse::<f64>().unwrap_or(0.0)
+            } else {
+                anyhow::bail!("无法获取音频文件时长: {:?}", audio_file);
+            };
+
+            if actual_duration_sec <= 0.0 {
+                anyhow::bail!("音频文件时长为 0: {:?}", audio_file);
+            }
+
+            // 计算速度调整比例
+            let speed_ratio = actual_duration_sec / target_duration_sec;
+
+            // 处理后的音频文件路径
+            let processed_file = temp_dir.path().join(format!("processed_{:04}.wav", i + 1));
+
+            // 如果速度比例接近 1.0（差异小于 1%），直接复制，否则调整速度
+            if (speed_ratio - 1.0).abs() < 0.01 {
+                // 速度几乎不需要调整，直接复制
+                tokio::fs::copy(audio_file, &processed_file).await?;
+            } else {
+                // 使用 atempo 滤镜调整速度
+                // atempo 的范围是 0.5 到 2.0，如果超出范围需要链式使用多个 atempo
+                let mut ffmpeg_args = vec![
+                    "-loglevel".to_string(),
+                    "error".to_string(),
+                    "-i".to_string(),
+                    audio_file.to_string_lossy().to_string(),
+                ];
+
+                // 构建 atempo 滤镜链
+                let mut tempo_chain = Vec::new();
+                let mut remaining_ratio = speed_ratio;
+
+                // atempo 范围是 0.5-2.0，如果超出需要链式使用
+                while remaining_ratio > 2.0 {
+                    tempo_chain.push(2.0);
+                    remaining_ratio /= 2.0;
+                }
+                while remaining_ratio < 0.5 {
+                    tempo_chain.push(0.5);
+                    remaining_ratio /= 0.5;
+                }
+                tempo_chain.push(remaining_ratio);
+
+                // 构建滤镜字符串
+                let filter_complex =
+                    if tempo_chain.len() == 1 && (tempo_chain[0] - 1.0).abs() < 0.01 {
+                        // 不需要调整
+                        "anull".to_string()
+                    } else {
+                        // 链式 atempo 滤镜
+                        tempo_chain
+                            .iter()
+                            .map(|&t| format!("atempo={:.3}", t))
+                            .collect::<Vec<_>>()
+                            .join(",")
+                    };
+
+                ffmpeg_args.extend(vec![
+                    "-af".to_string(),
+                    filter_complex,
+                    "-acodec".to_string(),
+                    "pcm_s16le".to_string(),
+                    "-ar".to_string(),
+                    "44100".to_string(),
+                    "-ac".to_string(),
+                    "2".to_string(),
+                    "-y".to_string(),
+                    processed_file.to_string_lossy().to_string(),
+                ]);
+
+                let output = tokio::process::Command::new("ffmpeg")
+                    .args(&ffmpeg_args)
+                    .output()
+                    .await
+                    .context("执行 ffmpeg 速度调整失败")?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!(
+                        "ffmpeg 速度调整失败 (文件: {:?}, 速度比例: {:.3}): {}",
+                        audio_file,
+                        speed_ratio,
+                        stderr
+                    );
+                }
+            }
+
+            processed_files.push(processed_file);
+        }
+
+        // 合并所有处理后的音频文件
+        let file_list_path = temp_dir.path().join("file_list.txt");
+        let mut file_list_content = String::new();
+        for file in &processed_files {
+            let abs_path = if file.exists() {
+                std::fs::canonicalize(file).unwrap_or_else(|_| file.clone())
+            } else {
+                file.clone()
+            };
+            let escaped_path = abs_path.display().to_string().replace('\'', "'\"'\"'");
+            file_list_content.push_str(&format!("file '{}'\n", escaped_path));
+        }
+
+        tokio::fs::write(&file_list_path, file_list_content).await?;
+
+        // 使用 ffmpeg concat 合并
+        let output = tokio::process::Command::new("ffmpeg")
+            .arg("-loglevel")
+            .arg("error")
             .arg("-f")
             .arg("concat")
             .arg("-safe")

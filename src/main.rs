@@ -49,6 +49,10 @@ struct Args {
     /// 批次间休息时间（秒）
     #[arg(long, default_value_t = 1)]
     rest_duration: u64,
+
+    /// 失败重试次数
+    #[arg(long, default_value_t = 3)]
+    retry_count: u32,
 }
 
 #[tokio::main]
@@ -73,6 +77,7 @@ async fn main() -> Result<()> {
         args.split_concurrent,
         args.batch_size,
         args.rest_duration,
+        args.retry_count,
         audio,
         srt,
     )
@@ -125,6 +130,7 @@ async fn run_cli_mode(
     split_concurrent: usize,
     batch_size: usize,
     rest_duration: u64,
+    retry_count: u32,
     audio: PathBuf,
     srt: PathBuf,
 ) -> Result<()> {
@@ -186,8 +192,11 @@ async fn run_cli_mode(
         let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
 
         // 创建任务执行器
-        let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent));
+        let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
         executor.set_total(task_manager.len() as u64);
+        if retry_count > 0 {
+            println!("失败重试次数: {}", retry_count);
+        }
 
         println!(
             "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
@@ -219,17 +228,29 @@ async fn run_cli_mode(
                 batch_end
             );
 
-            // 执行当前批次
+            // 执行当前批次（给每个任务添加总体超时保护，防止卡住）
             let futures: Vec<_> = batch_tasks
                 .iter()
                 .map(|task| {
                     let task = task.clone();
                     let executor = executor.clone();
-                    async move { executor.execute_task(task).await }
+                    async move {
+                        // 给整个任务添加 15 分钟超时（比内部 API 调用的 10 分钟超时稍长）
+                        tokio::time::timeout(
+                            std::time::Duration::from_secs(900), // 15 分钟
+                            executor.execute_task(task),
+                        )
+                        .await
+                        .unwrap_or_else(|_| {
+                            Err(anyhow::anyhow!("任务执行超时（超过 15 分钟）"))
+                        })
+                    }
                 })
                 .collect();
 
+            println!("开始执行批次任务...");
             let batch_results = futures::future::join_all(futures).await;
+            println!("批次任务执行完成，开始收集结果...");
             all_results.extend(batch_results);
 
             // 显示实时统计
@@ -249,6 +270,7 @@ async fn run_cli_mode(
 
         let results = all_results;
 
+        println!("\n所有批次任务已完成，开始检查结果...");
         // 检查结果
         let mut errors = Vec::new();
         let mut skipped = Vec::new();
@@ -298,15 +320,20 @@ async fn run_cli_mode(
             anyhow::bail!("部分任务执行失败");
         }
 
-        println!("所有任务执行完成，正在合并音频...");
+        println!("\n所有任务执行完成，开始收集音频文件...");
 
-        // 收集所有合成的音频文件（只包含实际存在的文件）
+        // 收集所有合成的音频文件及其对应的 SRT 条目（只包含实际存在的文件）
         let mut audio_files = Vec::new();
-        for task in tasks.iter() {
+        let mut srt_entries_for_merge = Vec::new();
+        // 按索引排序 tasks
+        let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+        sorted_tasks.sort_by_key(|task| task.entry.index);
+        for task in sorted_tasks {
             if task.output_path.exists() {
                 let metadata = tokio::fs::metadata(&task.output_path).await?;
                 if metadata.len() > 0 {
                     audio_files.push(task.output_path.clone());
+                    srt_entries_for_merge.push(task.entry.clone());
                 }
             }
         }
@@ -317,31 +344,40 @@ async fn run_cli_mode(
 
         println!("找到 {} 个有效的音频文件用于合并", audio_files.len());
 
-        // 按索引排序
-        audio_files.sort();
-
         // 合并音频（保存到 output/{uuid}.wav）
         let final_output = output.join(format!("{}.wav", uuid_str));
-        audio::AudioSplitter::merge_audio(&audio_files, &final_output).await?;
+        println!("开始合并 {} 个音频文件到: {}", audio_files.len(), final_output.display());
+        println!("（这可能需要一些时间，请耐心等待...）");
+        // 给合并操作添加超时保护（最多 30 分钟）
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1800), // 30 分钟
+            audio::AudioSplitter::merge_audio(&audio_files, &final_output),
+        )
+        .await
+        .context("合并音频超时（超过 30 分钟）")??;
 
-        println!("完成！最终音频已保存到: {}", final_output.display());
+        println!("完成！原始合并音频已保存到: {}", final_output.display());
+
+        // 生成根据 SRT 时间戳变速后的合并音频
+        let timed_output = output.join(format!("{}_timed.wav", uuid_str));
+        println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
+        println!("目标文件: {}", timed_output.display());
+        println!("（这可能需要一些时间，请耐心等待...）");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1800), // 30 分钟
+            audio::AudioSplitter::merge_audio_with_timing(
+                &audio_files,
+                &srt_entries_for_merge,
+                &timed_output,
+            ),
+        )
+        .await
+        .context("合并变速音频超时（超过 30 分钟）")??;
+
+        println!("完成！变速合并音频已保存到: {}", timed_output.display());
 
         Ok::<(), anyhow::Error>(())
     }
     .await;
-
-    // 询问是否删除临时目录文件
-    let mut input = String::new();
-    println!("是否删除临时目录文件？(y/n)");
-    std::io::stdin().read_line(&mut input).unwrap();
-    if input.trim() == "y" {
-        println!("正在清理临时文件...");
-        if let Err(e) = tokio::fs::remove_dir_all(&tmp_dir).await {
-            eprintln!("警告: 清理临时目录失败: {}", e);
-        } else {
-            println!("临时文件已清理");
-        }
-    }
-
     result
 }
