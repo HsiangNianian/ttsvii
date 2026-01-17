@@ -528,126 +528,37 @@ async fn get_status(State(state): State<AppState>) -> Json<TaskStatus> {
 
 async fn start_task(
     State(state): State<AppState>,
-    mut multipart: Multipart,
+    Json(config): Json<TaskConfig>,
 ) -> Json<serde_json::Value> {
-    // 创建临时目录用于存储上传的文件
-    let upload_dir = std::env::current_dir()
-        .unwrap_or_else(|_| std::path::PathBuf::from("."))
-        .join("uploads");
-
-    if let Err(e) = tokio::fs::create_dir_all(&upload_dir).await {
-        return Json(serde_json::json!({
-            "success": false,
-            "error": format!("创建上传目录失败: {}", e)
-        }));
-    }
-
-    let mut config = TaskConfig {
-        api_url: "http://183.147.142.111:63364".to_string(),
-        audio: String::new(),
-        srt: String::new(),
-        output: "./output".to_string(),
-        max_concurrent: 10,
-        split_concurrent: 4,
-        batch_size: 5,
-        rest_duration: 1,
-    };
-
-    // 解析 multipart 数据
-    while let Some(field) = multipart.next_field().await.unwrap_or_else(|e| {
-        eprintln!("解析 multipart 字段失败: {}", e);
-        None
-    }) {
-        let name = field.name().unwrap_or("").to_string();
-
-        if name == "audio" || name == "srt" {
-            // 处理文件上传
-            let original_filename = field
-                .file_name()
-                .unwrap_or(if name == "audio" { "audio" } else { "subtitle" })
-                .to_string();
-
-            // 生成唯一文件名（使用 UUID + 原始文件名）
-            let unique_id = Uuid::new_v4().to_string();
-            let extension = std::path::Path::new(&original_filename)
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or(if name == "audio" { "mp3" } else { "srt" });
-
-            let filename = format!("{}_{}.{}", name, unique_id, extension);
-            let file_path = upload_dir.join(&filename);
-
-            // 读取文件内容
-            let data = match field.bytes().await {
-                Ok(data) => data,
-                Err(e) => {
-                    return Json(serde_json::json!({
-                        "success": false,
-                        "error": format!("读取文件 {} 失败: {}", name, e)
-                    }));
-                }
-            };
-
-            // 保存文件
-            if let Err(e) = tokio::fs::write(&file_path, &data).await {
-                return Json(serde_json::json!({
-                    "success": false,
-                    "error": format!("保存文件 {} 失败: {}", name, e)
-                }));
-            }
-
-            if name == "audio" {
-                config.audio = file_path.to_string_lossy().to_string();
-            } else if name == "srt" {
-                config.srt = file_path.to_string_lossy().to_string();
-            }
-        } else {
-            // 处理文本字段
-            let value = match field.text().await {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-
-            match name.as_str() {
-                "api_url" => config.api_url = value,
-                "output" => config.output = value,
-                "max_concurrent" => {
-                    if let Ok(v) = value.parse() {
-                        config.max_concurrent = v;
-                    }
-                }
-                "split_concurrent" => {
-                    if let Ok(v) = value.parse() {
-                        config.split_concurrent = v;
-                    }
-                }
-                "batch_size" => {
-                    if let Ok(v) = value.parse() {
-                        config.batch_size = v;
-                    }
-                }
-                "rest_duration" => {
-                    if let Ok(v) = value.parse() {
-                        config.rest_duration = v;
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // 验证必需的文件
+    // 验证必需的文件路径
     if config.audio.is_empty() {
         return Json(serde_json::json!({
             "success": false,
-            "error": "未提供音频文件"
+            "error": "未提供音频文件路径"
         }));
     }
 
     if config.srt.is_empty() {
         return Json(serde_json::json!({
             "success": false,
-            "error": "未提供 SRT 字幕文件"
+            "error": "未提供 SRT 字幕文件路径"
+        }));
+    }
+
+    // 验证文件是否存在
+    let audio_path = std::path::Path::new(&config.audio);
+    if !audio_path.exists() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("音频文件不存在: {}", config.audio)
+        }));
+    }
+
+    let srt_path = std::path::Path::new(&config.srt);
+    if !srt_path.exists() {
+        return Json(serde_json::json!({
+            "success": false,
+            "error": format!("SRT 字幕文件不存在: {}", config.srt)
         }));
     }
 
