@@ -619,6 +619,36 @@
             </div>
             <div class="resize-handle"></div>
         </div>
+
+        <!-- 音频播放器便利贴 -->
+        <div class="sticky-note white" style="left: 50px; top: 850px; width: 600px; min-height: 200px; display: none;" data-note="audio" id="audioPlayerNote">
+            <h3>音频播放</h3>
+            <div class="note-content">
+                <!-- 原始音频播放器 -->
+                <div style="margin-bottom: 20px;">
+                    <div style="font-weight: 600; margin-bottom: 8px; color: #333;">原始音频</div>
+                    <audio id="originalAudio" controls style="width: 100%;" preload="metadata">
+                        您的浏览器不支持音频播放。
+                    </audio>
+                    <div style="display: flex; align-items: center; gap: 10px; margin-top: 5px;">
+                        <input type="range" id="originalAudioSeek" min="0" max="100" value="0" style="flex: 1; height: 5px; cursor: pointer;">
+                        <span id="originalAudioTime" style="font-size: 12px; color: #666; min-width: 80px;">0:00 / 0:00</span>
+                    </div>
+                </div>
+                <!-- 变速音频播放器 -->
+                <div>
+                    <div style="font-weight: 600; margin-bottom: 8px; color: #333;">变速音频</div>
+                    <audio id="timedAudio" controls style="width: 100%;" preload="metadata">
+                        您的浏览器不支持音频播放。
+                    </audio>
+                    <div style="display: flex; align-items: center; gap: 10px; margin-top: 5px;">
+                        <input type="range" id="timedAudioSeek" min="0" max="100" value="0" style="flex: 1; height: 5px; cursor: pointer;">
+                        <span id="timedAudioTime" style="font-size: 12px; color: #666; min-width: 80px;">0:00 / 0:00</span>
+                    </div>
+                </div>
+            </div>
+            <div class="resize-handle"></div>
+        </div>
     </div>
 
     <script>
@@ -669,6 +699,84 @@
             };
         }
 
+        function formatTime(seconds) {
+            if (isNaN(seconds) || !isFinite(seconds)) return '0:00';
+            const mins = Math.floor(seconds / 60);
+            const secs = Math.floor(seconds % 60);
+            return `${mins}:${secs.toString().padStart(2, '0')}`;
+        }
+
+        function setupAudioPlayer(audioId, seekId, timeId) {
+            const audio = document.getElementById(audioId);
+            const seek = document.getElementById(seekId);
+            const timeDisplay = document.getElementById(timeId);
+
+            if (!audio || !seek || !timeDisplay) return;
+
+            // 更新进度条
+            audio.addEventListener('loadedmetadata', () => {
+                seek.max = audio.duration || 0;
+                timeDisplay.textContent = `0:00 / ${formatTime(audio.duration)}`;
+            });
+
+            // 播放时更新进度条
+            audio.addEventListener('timeupdate', () => {
+                seek.value = audio.currentTime || 0;
+                timeDisplay.textContent = `${formatTime(audio.currentTime)} / ${formatTime(audio.duration)}`;
+            });
+
+            // 拖动进度条
+            seek.addEventListener('input', () => {
+                audio.currentTime = parseFloat(seek.value);
+            });
+
+            // 点击进度条
+            seek.addEventListener('change', () => {
+                audio.currentTime = parseFloat(seek.value);
+            });
+        }
+
+        function updateAudioPlayers(outputPath) {
+            const audioPlayerNote = document.getElementById('audioPlayerNote');
+            if (!audioPlayerNote) return;
+
+            if (!outputPath || outputPath === '-') {
+                audioPlayerNote.style.display = 'none';
+                return;
+            }
+
+            // 显示音频播放器
+            audioPlayerNote.style.display = 'block';
+
+            // 构建音频文件路径
+            // outputPath 格式: ./output/uuid.wav
+            // 原始音频: ./output/uuid.wav
+            // 变速音频: ./output/uuid_timed.wav
+            const basePath = outputPath.replace(/\.wav$/, '');
+            const originalAudioPath = basePath + '.wav';
+            const timedAudioPath = basePath + '_timed.wav';
+
+            // 设置音频源（通过 API 路由）
+            const originalAudio = document.getElementById('originalAudio');
+            const timedAudio = document.getElementById('timedAudio');
+
+            if (!originalAudio || !timedAudio) return;
+
+            // 构建 API URL
+            const originalUrl = `/api/audio/${originalAudioPath.replace('./', '')}`;
+            const timedUrl = `/api/audio/${timedAudioPath.replace('./', '')}`;
+
+            // 只有当 URL 改变时才更新
+            const originalFullUrl = window.location.origin + originalUrl;
+            const timedFullUrl = window.location.origin + timedUrl;
+            if (originalAudio.src !== originalFullUrl) {
+                originalAudio.src = originalUrl;
+            }
+            if (timedAudio.src !== timedFullUrl) {
+                timedAudio.src = timedUrl;
+            }
+        }
+
         function updateStatus(status) {
             // 更新状态徽章
             const stateBadge = document.getElementById('stateBadge');
@@ -696,6 +804,9 @@
 
             // 更新输出路径
             document.getElementById('outputPath').textContent = status.output_path || '-';
+            
+            // 更新音频播放器
+            updateAudioPlayers(status.output_path);
 
             // 更新进度条
             let percentage = 0;
@@ -1249,6 +1360,17 @@
             if (savedExtraArgs) extraArgs.value = savedExtraArgs;
         }
 
+        // 初始化音频播放器（在 DOM 加载完成后）
+        if (document.readyState === 'loading') {
+            document.addEventListener('DOMContentLoaded', () => {
+                setupAudioPlayer('originalAudio', 'originalAudioSeek', 'originalAudioTime');
+                setupAudioPlayer('timedAudio', 'timedAudioSeek', 'timedAudioTime');
+            });
+        } else {
+            setupAudioPlayer('originalAudio', 'originalAudioSeek', 'originalAudioTime');
+            setupAudioPlayer('timedAudio', 'timedAudioSeek', 'timedAudioTime');
+        }
+
         // 页面加载时连接 WebSocket
         window.addEventListener('load', () => {
             // 恢复主题
@@ -1272,6 +1394,10 @@
             setupFileInputs();
             initDragAndDrop();
             initResize();
+            
+            // 初始化音频播放器
+            setupAudioPlayer('originalAudio', 'originalAudioSeek', 'originalAudioTime');
+            setupAudioPlayer('timedAudio', 'timedAudioSeek', 'timedAudioTime');
             
             // 定期获取状态（作为 WebSocket 的备用）
             setInterval(async () => {

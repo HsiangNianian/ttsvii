@@ -634,8 +634,49 @@ impl AppState {
 pub async fn create_router() -> Router {
     use tower::ServiceBuilder;
     use tower_http::limit::RequestBodyLimitLayer;
+    use axum::response::Response;
+    use axum::body::Body;
+    use axum::http::{header, StatusCode};
+    use std::path::Path;
 
     let state = AppState::new();
+
+    // 静态文件服务处理器（用于提供音频文件）
+    async fn serve_audio_file(path: axum::extract::Path<String>) -> Result<Response<Body>, StatusCode> {
+        // 移除开头的 ./ 或 /
+        let file_path = path.trim_start_matches("./").trim_start_matches("/");
+        let path_buf = Path::new(file_path);
+        
+        // 安全检查：只允许访问 output 目录下的文件
+        if !path_buf.starts_with("output/") {
+            return Err(StatusCode::FORBIDDEN);
+        }
+
+        // 检查文件是否存在
+        if !path_buf.exists() {
+            return Err(StatusCode::NOT_FOUND);
+        }
+
+        // 读取文件
+        match tokio::fs::read(&path_buf).await {
+            Ok(data) => {
+                // 根据文件扩展名设置 Content-Type
+                let content_type = if path_buf.extension().and_then(|s| s.to_str()) == Some("wav") {
+                    "audio/wav"
+                } else {
+                    "application/octet-stream"
+                };
+
+                Ok(Response::builder()
+                    .status(StatusCode::OK)
+                    .header(header::CONTENT_TYPE, content_type)
+                    .header(header::CACHE_CONTROL, "public, max-age=3600")
+                    .body(Body::from(data))
+                    .unwrap())
+            }
+            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    }
 
     Router::new()
         .route("/", get(index_handler))
@@ -645,6 +686,7 @@ pub async fn create_router() -> Router {
         .route("/api/upload/chunk", post(upload_chunk))
         .route("/api/upload/check", get(check_upload))
         .route("/api/upload/merge", post(merge_upload))
+        .route("/api/audio/*path", get(serve_audio_file))
         .route("/ws", get(ws_handler))
         .layer(
             ServiceBuilder::new()

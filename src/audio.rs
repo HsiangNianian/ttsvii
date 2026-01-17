@@ -233,18 +233,16 @@ impl AudioSplitter {
 
         // 处理每个音频文件，根据 SRT 时间戳调整速度
         for (i, (audio_file, entry)) in audio_files.iter().zip(srt_entries.iter()).enumerate() {
-            // 只在每 10 个文件或最后一个文件时更新回调，减少刷屏
-            let should_update_callback = (i + 1) % 10 == 0 || (i + 1) == audio_files.len();
-            if should_update_callback {
+            // 只在每 10 个文件或最后一个文件时更新消息和回调，减少刷屏
+            let should_update = (i + 1) % 10 == 0 || (i + 1) == audio_files.len();
+            if should_update {
                 let msg = format!("处理文件 {}/{}", i + 1, audio_files.len());
                 progress.set_message(msg.clone());
                 if let Some(ref mut cb) = progress_callback {
                     cb(i + 1, audio_files.len(), msg.clone());
                 }
-            } else {
-                // 只更新进度条，不调用回调
-                progress.set_message(format!("处理文件 {}/{}", i + 1, audio_files.len()));
             }
+            // 进度条会自动更新进度（通过 progress.inc(1)），不需要每次都更新消息
             // 计算目标时长（从 SRT 时间戳）
             let target_duration_ms = (entry.end_time - entry.start_time).num_milliseconds();
             let target_duration_sec = target_duration_ms as f64 / 1000.0;
