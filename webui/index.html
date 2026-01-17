@@ -281,15 +281,15 @@
                         </div>
 
                         <div class="form-group">
-                            <label for="audio">音频文件</label>
-                            <input type="file" id="audio" name="audio" accept="audio/*" required>
-                            <small style="color: #666; display: block; margin-top: 5px;">请选择音频文件（支持 MP3、WAV 等格式）</small>
+                            <label for="audio">音频文件路径</label>
+                            <input type="text" id="audio" name="audio" placeholder="例如: ./tests/test.MP3" required>
+                            <small style="color: #666; display: block; margin-top: 5px;">请输入音频文件的绝对路径或相对路径</small>
                         </div>
 
                         <div class="form-group">
-                            <label for="srt">SRT 字幕文件</label>
-                            <input type="file" id="srt" name="srt" accept=".srt,text/plain" required>
-                            <small style="color: #666; display: block; margin-top: 5px;">请选择 SRT 字幕文件</small>
+                            <label for="srt">SRT 字幕文件路径</label>
+                            <input type="text" id="srt" name="srt" placeholder="例如: ./tests/input_trans_shortened.srt" required>
+                            <small style="color: #666; display: block; margin-top: 5px;">请输入 SRT 字幕文件的绝对路径或相对路径</small>
                         </div>
 
                         <div class="form-group">
@@ -517,33 +517,24 @@
             const form = document.getElementById('configForm');
             const formData = new FormData(form);
             
-            // 检查文件是否已选择
-            const audioFile = formData.get('audio');
-            const srtFile = formData.get('srt');
-            
-            if (!audioFile || audioFile.size === 0) {
-                alert('请选择音频文件');
-                return;
-            }
-            
-            if (!srtFile || srtFile.size === 0) {
-                alert('请选择 SRT 字幕文件');
-                return;
-            }
-
-            // 添加其他配置参数
-            formData.append('api_url', document.getElementById('api_url').value);
-            formData.append('output', document.getElementById('output').value);
-            formData.append('max_concurrent', document.getElementById('max_concurrent').value);
-            formData.append('split_concurrent', document.getElementById('split_concurrent').value);
-            formData.append('batch_size', document.getElementById('batch_size').value);
-            formData.append('rest_duration', document.getElementById('rest_duration').value);
+            const config = {
+                api_url: formData.get('api_url'),
+                audio: formData.get('audio'),
+                srt: formData.get('srt'),
+                output: formData.get('output'),
+                max_concurrent: parseInt(formData.get('max_concurrent')),
+                split_concurrent: parseInt(formData.get('split_concurrent')),
+                batch_size: parseInt(formData.get('batch_size')),
+                rest_duration: parseInt(formData.get('rest_duration'))
+            };
 
             try {
-                addLog('正在上传文件...', 'info');
                 const response = await fetch('/api/start', {
                     method: 'POST',
-                    body: formData
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(config)
                 });
 
                 const result = await response.json();

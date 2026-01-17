@@ -2,7 +2,7 @@ use crate::task::{TaskExecutor, TaskManager};
 use crate::{api, audio, srt};
 use anyhow::{Context, Result};
 use axum::{
-    extract::{ws::WebSocketUpgrade, Multipart, State},
+    extract::{ws::WebSocketUpgrade, State},
     response::{Html, Json},
     routing::{get, post},
     Router,
