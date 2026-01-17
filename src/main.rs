@@ -106,9 +106,10 @@ async fn main() -> Result<()> {
             if let Err(e) = result {
                 let err_msg = e.to_string();
                 // 区分可跳过的错误（空文本、空音频）和真正的 API 错误
-                if err_msg.contains("文本内容为空") 
-                    || err_msg.contains("音频文件为空") 
-                    || err_msg.contains("音频文件不存在") {
+                if err_msg.contains("文本内容为空")
+                    || err_msg.contains("音频文件为空")
+                    || err_msg.contains("音频文件不存在")
+                {
                     skipped.push((i, err_msg));
                 } else {
                     errors.push((i, e));
@@ -132,17 +133,16 @@ async fn main() -> Result<()> {
             if errors.len() > 20 {
                 eprintln!("  ... 还有 {} 个错误未显示", errors.len() - 20);
             }
-            
-            // 如果失败任务太多，询问是否继续
+
+            // 显示统计信息
             let success_count = tasks.len() - errors.len() - skipped.len();
-            if success_count > 0 {
-                println!("\n成功: {} 个, 失败: {} 个, 跳过: {} 个", 
-                    success_count, errors.len(), skipped.len());
-                println!("是否继续合并已成功的音频？(y/n)");
-                // 对于非交互式环境，默认继续
-                // 在实际使用中，可以添加命令行参数控制此行为
-            }
-            
+            println!(
+                "\n统计: 成功: {} 个, 失败: {} 个, 跳过: {} 个",
+                success_count,
+                errors.len(),
+                skipped.len()
+            );
+
             anyhow::bail!("部分任务执行失败");
         }
 
