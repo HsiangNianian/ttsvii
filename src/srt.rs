@@ -21,6 +21,8 @@ impl SrtParser {
         Self::convert_to_entries(subtitles)
     }
 
+    /// 从字符串内容解析 SRT 格式的字幕
+    #[allow(dead_code)] // 公开 API，可能被外部使用
     pub fn parse(content: &str) -> Result<Vec<SrtEntry>> {
         let subtitles = Subtitles::parse_from_str(content.to_string())
             .map_err(|e| anyhow::anyhow!("解析 SRT 文件失败: {}", e))?;

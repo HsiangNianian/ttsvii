@@ -69,6 +69,7 @@ jobs:
             ${{ runner.os }}-${{ matrix.target }}-
       
       - name: Build release
+        shell: bash
         run: |
           if [ "${{ matrix.use-cross }}" = "true" ]; then
             cross build --release --target ${{ matrix.target }}
