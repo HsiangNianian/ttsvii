@@ -526,6 +526,41 @@ async fn get_status(State(state): State<AppState>) -> Json<TaskStatus> {
     Json(state.status.read().await.clone())
 }
 
+/// 查找文件路径，如果路径不存在，尝试在常见位置查找
+fn find_file_path(path_str: &str) -> Result<PathBuf> {
+    let path = PathBuf::from(path_str);
+    
+    // 如果路径存在，直接返回
+    if path.exists() {
+        return Ok(path);
+    }
+    
+    // 如果只是文件名，尝试在常见位置查找
+    if path.parent().is_none() || path.parent() == Some(std::path::Path::new("")) {
+        let filename = path.file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| anyhow::anyhow!("无效的文件名: {}", path_str))?;
+        
+        // 尝试在当前工作目录查找
+        let current_dir = std::env::current_dir()?;
+        let possible_paths = vec![
+            current_dir.join(filename),
+            current_dir.join("tests").join(filename),
+            current_dir.join("uploads").join(filename),
+        ];
+        
+        for possible_path in possible_paths {
+            if possible_path.exists() {
+                return Ok(possible_path);
+            }
+        }
+        
+        anyhow::bail!("文件不存在且无法找到: {}", path_str);
+    }
+    
+    anyhow::bail!("文件不存在: {}", path_str);
+}
+
 async fn start_task(
     State(state): State<AppState>,
     Json(config): Json<TaskConfig>,
@@ -545,24 +580,33 @@ async fn start_task(
         }));
     }
 
-    // 验证文件是否存在
-    let audio_path = std::path::Path::new(&config.audio);
-    if !audio_path.exists() {
-        return Json(serde_json::json!({
-            "success": false,
-            "error": format!("音频文件不存在: {}", config.audio)
-        }));
-    }
+    // 验证文件是否存在，如果路径不存在，尝试查找文件
+    let audio_path = match find_file_path(&config.audio) {
+        Ok(path) => path,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("音频文件: {}", e)
+            }));
+        }
+    };
+    
+    let srt_path = match find_file_path(&config.srt) {
+        Ok(path) => path,
+        Err(e) => {
+            return Json(serde_json::json!({
+                "success": false,
+                "error": format!("SRT 字幕文件: {}", e)
+            }));
+        }
+    };
+    
+    // 更新配置中的路径为实际找到的路径
+    let mut final_config = config;
+    final_config.audio = audio_path.to_string_lossy().to_string();
+    final_config.srt = srt_path.to_string_lossy().to_string();
 
-    let srt_path = std::path::Path::new(&config.srt);
-    if !srt_path.exists() {
-        return Json(serde_json::json!({
-            "success": false,
-            "error": format!("SRT 字幕文件不存在: {}", config.srt)
-        }));
-    }
-
-    match state.start_task(config).await {
+    match state.start_task(final_config).await {
         Ok(_) => Json(serde_json::json!({ "success": true })),
         Err(e) => Json(serde_json::json!({ "success": false, "error": e.to_string() })),
     }

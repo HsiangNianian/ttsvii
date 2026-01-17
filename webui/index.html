@@ -281,15 +281,17 @@
                         </div>
 
                         <div class="form-group">
-                            <label for="audio">音频文件路径</label>
-                            <input type="text" id="audio" name="audio" placeholder="例如: ./tests/test.MP3" required>
-                            <small style="color: #666; display: block; margin-top: 5px;">请输入音频文件的绝对路径或相对路径</small>
+                            <label for="audio">音频文件</label>
+                            <input type="file" id="audio" name="audio" accept="audio/*" required>
+                            <input type="hidden" id="audio_path" name="audio_path">
+                            <small id="audio_path_display" style="color: #666; display: block; margin-top: 5px;">请选择音频文件</small>
                         </div>
 
                         <div class="form-group">
-                            <label for="srt">SRT 字幕文件路径</label>
-                            <input type="text" id="srt" name="srt" placeholder="例如: ./tests/input_trans_shortened.srt" required>
-                            <small style="color: #666; display: block; margin-top: 5px;">请输入 SRT 字幕文件的绝对路径或相对路径</small>
+                            <label for="srt">SRT 字幕文件</label>
+                            <input type="file" id="srt" name="srt" accept=".srt,text/plain" required>
+                            <input type="hidden" id="srt_path" name="srt_path">
+                            <small id="srt_path_display" style="color: #666; display: block; margin-top: 5px;">请选择 SRT 字幕文件</small>
                         </div>
 
                         <div class="form-group">
@@ -513,14 +515,79 @@
             logArea.scrollTop = logArea.scrollHeight;
         }
 
+        // 处理文件选择，尝试获取文件路径
+        function setupFileInputs() {
+            const audioInput = document.getElementById('audio');
+            const srtInput = document.getElementById('srt');
+            const audioPathDisplay = document.getElementById('audio_path_display');
+            const srtPathDisplay = document.getElementById('srt_path_display');
+
+            audioInput.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    // 尝试获取文件路径（某些浏览器可能支持）
+                    let filePath = '';
+                    
+                    // 尝试从 file 对象获取路径
+                    if (file.path) {
+                        // Electron/Tauri 等框架可能提供 path 属性
+                        filePath = file.path;
+                    } else if (file.webkitRelativePath) {
+                        // 相对路径
+                        filePath = file.webkitRelativePath;
+                    } else {
+                        // 如果无法获取路径，使用文件名
+                        // 后端会尝试从常见路径查找
+                        filePath = file.name;
+                    }
+                    
+                    document.getElementById('audio_path').value = filePath;
+                    audioPathDisplay.textContent = '已选择: ' + file.name + (filePath !== file.name ? ' (路径: ' + filePath + ')' : '');
+                }
+            });
+
+            srtInput.addEventListener('change', function(e) {
+                const file = e.target.files[0];
+                if (file) {
+                    // 尝试获取文件路径
+                    let filePath = '';
+                    
+                    if (file.path) {
+                        filePath = file.path;
+                    } else if (file.webkitRelativePath) {
+                        filePath = file.webkitRelativePath;
+                    } else {
+                        filePath = file.name;
+                    }
+                    
+                    document.getElementById('srt_path').value = filePath;
+                    srtPathDisplay.textContent = '已选择: ' + file.name + (filePath !== file.name ? ' (路径: ' + filePath + ')' : '');
+                }
+            });
+        }
+
         async function startTask() {
             const form = document.getElementById('configForm');
             const formData = new FormData(form);
             
+            // 获取文件路径（从隐藏字段）
+            const audioPath = document.getElementById('audio_path').value;
+            const srtPath = document.getElementById('srt_path').value;
+            
+            if (!audioPath) {
+                alert('请选择音频文件');
+                return;
+            }
+            
+            if (!srtPath) {
+                alert('请选择 SRT 字幕文件');
+                return;
+            }
+            
             const config = {
                 api_url: formData.get('api_url'),
-                audio: formData.get('audio'),
-                srt: formData.get('srt'),
+                audio: audioPath,
+                srt: srtPath,
                 output: formData.get('output'),
                 max_concurrent: parseInt(formData.get('max_concurrent')),
                 split_concurrent: parseInt(formData.get('split_concurrent')),
@@ -570,6 +637,7 @@
         // 页面加载时连接 WebSocket
         window.addEventListener('load', () => {
             connectWebSocket();
+            setupFileInputs();
             // 定期获取状态（作为 WebSocket 的备用）
             setInterval(async () => {
                 try {
