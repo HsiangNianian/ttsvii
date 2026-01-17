@@ -37,6 +37,8 @@ pub struct TaskConfig {
     pub split_concurrent: usize,
     pub batch_size: usize,
     pub rest_duration: u64,
+    #[serde(default)]
+    pub extra_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -518,7 +520,7 @@ impl AppState {
 pub async fn create_router() -> Router {
     use tower::ServiceBuilder;
     use tower_http::limit::RequestBodyLimitLayer;
-    
+
     let state = AppState::new();
 
     Router::new()
@@ -533,7 +535,7 @@ pub async fn create_router() -> Router {
         .layer(
             ServiceBuilder::new()
                 .layer(RequestBodyLimitLayer::new(3 * 1024 * 1024)) // 3MB 限制（每个分块 1MB，加上元数据足够）
-                .layer(CorsLayer::permissive())
+                .layer(CorsLayer::permissive()),
         )
         .with_state(state)
 }
@@ -555,9 +557,74 @@ async fn start_task(
     if !audio_path.exists() {
         return Json(serde_json::json!({
             "success": false,
-            "error": format!("音频文件不存在: {}", config.audio)
+            "error": format!("音频/视频文件不存在: {}", config.audio)
         }));
     }
+
+    // 如果是视频文件，先提取音频
+    let final_audio_path = if let Some(ext) = audio_path.extension() {
+        let ext_lower = ext.to_string_lossy().to_lowercase();
+        if matches!(
+            ext_lower.as_str(),
+            "mp4" | "avi" | "mov" | "mkv" | "webm" | "flv" | "wmv"
+        ) {
+            // 视频文件，需要提取音频
+            let temp_audio = std::env::current_dir()
+                .unwrap_or_else(|_| std::path::PathBuf::from("."))
+                .join("tmp")
+                .join(format!("extracted_audio_{}.wav", uuid::Uuid::new_v4()));
+
+            if let Err(e) = tokio::fs::create_dir_all(temp_audio.parent().unwrap()).await {
+                return Json(serde_json::json!({
+                    "success": false,
+                    "error": format!("创建临时目录失败: {}", e)
+                }));
+            }
+
+            // 使用 ffmpeg 提取音频
+            let output = tokio::process::Command::new("ffmpeg")
+                .arg("-i")
+                .arg(&config.audio)
+                .arg("-vn") // 不包含视频
+                .arg("-acodec")
+                .arg("pcm_s16le") // PCM 16-bit little-endian
+                .arg("-ar")
+                .arg("44100") // 采样率
+                .arg("-ac")
+                .arg("2") // 立体声
+                .arg("-y")
+                .arg(&temp_audio)
+                .output()
+                .await;
+
+            match output {
+                Ok(output) if output.status.success() => temp_audio,
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    return Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("提取视频音频失败: {}", stderr)
+                    }));
+                }
+                Err(e) => {
+                    return Json(serde_json::json!({
+                        "success": false,
+                        "error": format!("执行 ffmpeg 失败: {}", e)
+                    }));
+                }
+            }
+        } else {
+            // 音频文件，直接使用
+            audio_path.to_path_buf()
+        }
+    } else {
+        // 无扩展名，假设是音频文件
+        audio_path.to_path_buf()
+    };
+
+    // 创建新的配置，使用提取后的音频路径
+    let mut final_config = config.clone();
+    final_config.audio = final_audio_path.to_string_lossy().to_string();
 
     let srt_path = std::path::Path::new(&config.srt);
     if !srt_path.exists() {
@@ -577,7 +644,7 @@ async fn start_task(
 async fn upload_chunk(mut multipart: Multipart) -> Json<serde_json::Value> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    
+
     // 存储上传信息（实际应用中应该使用数据库或文件系统）
     static UPLOAD_INFO: OnceLock<Mutex<HashMap<String, Vec<usize>>>> = OnceLock::new();
     let upload_info = UPLOAD_INFO.get_or_init(|| Mutex::new(HashMap::new()));
@@ -606,40 +673,32 @@ async fn upload_chunk(mut multipart: Multipart) -> Json<serde_json::Value> {
                 let name = field.name().unwrap_or("").to_string();
 
                 match name.as_str() {
-                    "chunk" => {
-                        match field.bytes().await {
-                            Ok(data) => chunk_data = data.to_vec(),
-                            Err(e) => {
-                                eprintln!("读取分块数据失败: {}", e);
-                            }
+                    "chunk" => match field.bytes().await {
+                        Ok(data) => chunk_data = data.to_vec(),
+                        Err(e) => {
+                            eprintln!("读取分块数据失败: {}", e);
                         }
-                    }
-                    "upload_id" => {
-                        match field.text().await {
-                            Ok(text) => upload_id = text,
-                            Err(e) => {
-                                eprintln!("读取 upload_id 失败: {}", e);
-                            }
+                    },
+                    "upload_id" => match field.text().await {
+                        Ok(text) => upload_id = text,
+                        Err(e) => {
+                            eprintln!("读取 upload_id 失败: {}", e);
                         }
-                    }
-                    "file_type" => {
-                        match field.text().await {
-                            Ok(text) => file_type = text,
-                            Err(e) => {
-                                eprintln!("读取 file_type 失败: {}", e);
-                            }
+                    },
+                    "file_type" => match field.text().await {
+                        Ok(text) => file_type = text,
+                        Err(e) => {
+                            eprintln!("读取 file_type 失败: {}", e);
                         }
-                    }
-                    "chunk_index" => {
-                        match field.text().await {
-                            Ok(text) => {
-                                chunk_index = text.parse().unwrap_or(0);
-                            }
-                            Err(e) => {
-                                eprintln!("读取 chunk_index 失败: {}", e);
-                            }
+                    },
+                    "chunk_index" => match field.text().await {
+                        Ok(text) => {
+                            chunk_index = text.parse().unwrap_or(0);
                         }
-                    }
+                        Err(e) => {
+                            eprintln!("读取 chunk_index 失败: {}", e);
+                        }
+                    },
                     _ => {
                         // 忽略其他字段（如 filename, file_size, total_chunks）
                         // 但需要读取数据以推进解析器，否则会阻塞
@@ -706,10 +765,10 @@ async fn check_upload(
 ) -> Json<serde_json::Value> {
     use std::collections::HashMap;
     use std::sync::{Mutex, OnceLock};
-    
+
     static UPLOAD_INFO: OnceLock<Mutex<HashMap<String, Vec<usize>>>> = OnceLock::new();
     let upload_info = UPLOAD_INFO.get_or_init(|| Mutex::new(HashMap::new()));
-    
+
     let upload_id = params.get("upload_id").cloned().unwrap_or_default();
     let file_type = params.get("file_type").cloned().unwrap_or_default();
 

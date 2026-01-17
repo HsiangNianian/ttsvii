@@ -14,10 +14,9 @@ impl AudioSplitter {
         output_dir: &Path,
         index: u32,
     ) -> Result<PathBuf> {
-        let start_secs =
-            start_time.num_seconds() as f64 + start_time.num_milliseconds() as f64 / 1000.0;
-        let duration = (end_time - start_time).num_seconds() as f64
-            + (end_time - start_time).num_milliseconds() as f64 / 1000.0;
+        // chrono::Duration::num_milliseconds() 返回总毫秒数，直接除以 1000 转换为秒
+        let start_secs = start_time.num_milliseconds() as f64 / 1000.0;
+        let duration = (end_time - start_time).num_milliseconds() as f64 / 1000.0;
 
         // 验证时间范围
         if start_secs < 0.0 {
@@ -32,11 +31,48 @@ impl AudioSplitter {
 
         let output_path = output_dir.join(format!("segment_{:04}.wav", index));
 
+        // 先获取输入音频文件的实际时长
+        let probe_output = tokio::process::Command::new("ffprobe")
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=noprint_wrappers=1:nokey=1")
+            .arg(audio_path)
+            .output()
+            .await;
+
+        let actual_duration = if let Ok(probe_output) = probe_output {
+            if probe_output.status.success() {
+                let duration_str = String::from_utf8_lossy(&probe_output.stdout);
+                duration_str.trim().parse::<f64>().ok()
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // 如果切分时间超出实际时长，调整结束时间
+        let adjusted_duration = if let Some(actual) = actual_duration {
+            if start_secs >= actual {
+                anyhow::bail!("起始时间 {} 超出音频时长 {}", start_secs, actual);
+            }
+            if start_secs + duration > actual {
+                actual - start_secs
+            } else {
+                duration
+            }
+        } else {
+            duration
+        };
+
         // 使用 ffmpeg 切分音频
+        // 对于从视频提取的 PCM WAV，使用重新编码而不是 copy
         // 使用 -threads 1 限制每个进程的线程数，减少内存占用
         // 使用 -loglevel error 减少日志输出
         // 添加 -avoid_negative_ts make_zero 避免时间戳问题
-        // 添加 -strict experimental 确保兼容性
         let output = tokio::process::Command::new("ffmpeg")
             .arg("-loglevel")
             .arg("error")
@@ -47,9 +83,13 @@ impl AudioSplitter {
             .arg("-ss")
             .arg(start_secs.to_string())
             .arg("-t")
-            .arg(duration.to_string())
+            .arg(adjusted_duration.to_string())
             .arg("-acodec")
-            .arg("copy")
+            .arg("pcm_s16le") // 使用 PCM 编码，兼容从视频提取的音频
+            .arg("-ar")
+            .arg("44100") // 采样率
+            .arg("-ac")
+            .arg("2") // 立体声
             .arg("-avoid_negative_ts")
             .arg("make_zero")
             .arg("-y")

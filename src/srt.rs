@@ -58,11 +58,23 @@ impl SrtParser {
 
 /// 将 srtlib 的 Timestamp 转换为 chrono::Duration
 fn timestamp_to_duration(ts: &Timestamp) -> Result<Duration> {
+    // srtlib 的 get() 方法返回 (hours, minutes, seconds, milliseconds)
+    // 根据 SRT 格式：00:00:06,633 中 633 是毫秒（0-999）
     let (hours, minutes, seconds, milliseconds) = ts.get();
-    let total_ms = hours as i64 * 3600 * 1000
-        + minutes as i64 * 60 * 1000
-        + seconds as i64 * 1000
-        + milliseconds as i64;
+
+    // 检查 milliseconds 是否在合理范围内（0-999）
+    // 如果 >= 1000，说明 srtlib 可能返回的是其他单位，需要调整
+    let ms = if milliseconds >= 1000 {
+        // 如果 milliseconds >= 1000，可能是 srtlib 返回的是微秒或其他单位
+        // 或者解析错误，先尝试除以1000
+        eprintln!("警告: milliseconds 值异常 ({})，尝试调整", milliseconds);
+        milliseconds / 1000
+    } else {
+        milliseconds
+    };
+
+    let total_ms =
+        hours as i64 * 3600 * 1000 + minutes as i64 * 60 * 1000 + seconds as i64 * 1000 + ms as i64;
 
     Ok(Duration::milliseconds(total_ms))
 }

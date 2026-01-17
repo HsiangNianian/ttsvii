@@ -155,6 +155,25 @@ async fn run_cli_mode(
         let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
         println!("找到 {} 个字幕条目", srt_entries.len());
 
+        if !srt_entries.is_empty() {
+            println!("\n前 3 个字幕条目的时间信息:");
+            for entry in srt_entries.iter().take(3) {
+                let start_ms = entry.start_time.num_milliseconds();
+                let end_ms = entry.end_time.num_milliseconds();
+                println!(
+                    "  条目 {}: 开始={}ms ({:.3}s), 结束={}ms ({:.3}s), 时长={}ms ({:.3}s), 文本=\"{}\"",
+                    entry.index,
+                    start_ms,
+                    start_ms as f64 / 1000.0,
+                    end_ms,
+                    end_ms as f64 / 1000.0,
+                    end_ms - start_ms,
+                    (end_ms - start_ms) as f64 / 1000.0,
+                    entry.text.trim().chars().take(30).collect::<String>()
+                );
+            }
+        }
+
         // 创建任务管理器
         let task_manager = TaskManager::new(srt_entries, &audio, &tmp_dir, &output_task_dir)?;
 
