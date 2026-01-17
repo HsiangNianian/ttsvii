@@ -114,5 +114,13 @@ async fn main() -> Result<()> {
 
     println!("完成！最终音频已保存到: {}", final_output.display());
 
+    // 清理临时目录
+    println!("正在清理临时文件...");
+    if let Err(e) = tokio::fs::remove_dir_all(&tmp_dir).await {
+        eprintln!("警告: 清理临时目录失败: {}", e);
+    } else {
+        println!("临时文件已清理");
+    }
+
     Ok(())
 }

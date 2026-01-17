@@ -123,12 +123,12 @@ impl TaskManager {
                 async move {
                     let output_dir = speaker_path.parent().unwrap();
 
-                    // 切分音频片段到临时路径
+                    // 直接切分音频片段到 speaker 路径
                     let temp_path =
                         AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
                             .await?;
 
-                    // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
+                    // 复制到 emotion 路径（使用相同的音频片段）
                     tokio::fs::copy(&temp_path, &speaker_path).await?;
                     tokio::fs::copy(&temp_path, &emotion_path).await?;
 
