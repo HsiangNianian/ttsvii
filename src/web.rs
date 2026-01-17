@@ -537,10 +537,14 @@ impl AppState {
                 // 总进度 = 原始任务数 + 变速处理的文件数
                 let total_progress = tasks_len_for_callback + audio_files_len;
 
+                // 获取原始音频路径（用于计算总时长和空白时间段）
+                let original_audio_path = PathBuf::from(&config.audio);
+
                 audio::AudioSplitter::merge_audio_with_timing(
                     &audio_files,
                     &srt_entries_for_merge,
                     &timed_output,
+                    &original_audio_path,
                     Some(move |current, total, msg: String| {
                         // 在异步上下文中更新状态
                         let state_clone = state_for_callback.clone();

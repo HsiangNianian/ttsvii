@@ -361,6 +361,7 @@ async fn run_cli_mode(
                 &audio_files,
                 &srt_entries_for_merge,
                 &timed_output,
+                &audio, // 传入原始音频/视频路径
                 // 不在这里打印日志，让进度条自己显示
                 None::<fn(usize, usize, String)>,
             ),

@@ -201,11 +201,13 @@ impl AudioSplitter {
     /// audio_files: 音频文件路径列表（已按索引排序）
     /// srt_entries: SRT 条目列表（已按索引排序）
     /// output_path: 输出文件路径
+    /// original_audio_path: 原始音频/视频文件路径（用于获取总时长和计算空白时间段）
     /// progress_callback: 可选的进度回调函数 (当前进度, 总数, 消息)
     pub async fn merge_audio_with_timing<F>(
         audio_files: &[PathBuf],
         srt_entries: &[SrtEntry],
         output_path: &Path,
+        original_audio_path: &Path,
         mut progress_callback: Option<F>,
     ) -> Result<()>
     where
@@ -221,6 +223,29 @@ impl AudioSplitter {
 
         let temp_dir = TempDir::new()?;
         let mut processed_files = Vec::new();
+
+        // 获取原始音频/视频的总时长
+        let probe_output = tokio::process::Command::new("ffprobe")
+            .arg("-v")
+            .arg("error")
+            .arg("-show_entries")
+            .arg("format=duration")
+            .arg("-of")
+            .arg("default=noprint_wrappers=1:nokey=1")
+            .arg(original_audio_path)
+            .output()
+            .await?;
+
+        let original_duration_sec = if probe_output.status.success() {
+            let duration_str = String::from_utf8_lossy(&probe_output.stdout);
+            duration_str.trim().parse::<f64>().unwrap_or(0.0)
+        } else {
+            anyhow::bail!("无法获取原始音频/视频时长: {:?}", original_audio_path);
+        };
+
+        if original_duration_sec <= 0.0 {
+            anyhow::bail!("原始音频/视频时长为 0: {:?}", original_audio_path);
+        }
 
         // 创建进度条
         let progress = ProgressBar::new(audio_files.len() as u64);
@@ -359,12 +384,81 @@ impl AudioSplitter {
         }
         progress.finish_with_message(finish_msg);
 
-        // 合并所有处理后的音频文件
+        // 计算空白时间段并生成空白音频片段
+        let mut silence_segments = Vec::new();
+
+        // 1. 起始空白：0 到第一句话的开始时间
+        if let Some(first_entry) = srt_entries.first() {
+            let start_silence_ms = first_entry.start_time.num_milliseconds();
+            if start_silence_ms > 0 {
+                let start_silence_sec = start_silence_ms as f64 / 1000.0;
+                silence_segments.push((0, start_silence_sec)); // 0 表示在开头
+            }
+        }
+
+        // 2. 中间空白：每句话之间的空白
+        for i in 0..(srt_entries.len() - 1) {
+            let current_end = srt_entries[i].end_time.num_milliseconds();
+            let next_start = srt_entries[i + 1].start_time.num_milliseconds();
+            let gap_ms = next_start - current_end;
+
+            if gap_ms > 0 {
+                let gap_sec = gap_ms as f64 / 1000.0;
+                silence_segments.push((i + 1, gap_sec)); // i+1 表示在第 i+1 个音频之后
+            }
+        }
+
+        // 3. 末尾空白：最后一句话的结束时间到原始音频总时长
+        if let Some(last_entry) = srt_entries.last() {
+            let last_end_ms = last_entry.end_time.num_milliseconds();
+            let original_duration_ms = (original_duration_sec * 1000.0) as i64;
+            let end_silence_ms = original_duration_ms - last_end_ms;
+
+            if end_silence_ms > 0 {
+                let end_silence_sec = end_silence_ms as f64 / 1000.0;
+                silence_segments.push((srt_entries.len(), end_silence_sec)); // 在最后
+            }
+        }
+
+        // 生成空白音频文件
+        let mut silence_files = Vec::new();
+        for (idx, (position, duration_sec)) in silence_segments.iter().enumerate() {
+            let silence_file = temp_dir.path().join(format!("silence_{}.wav", idx));
+            Self::generate_silence(&silence_file, *duration_sec).await?;
+            silence_files.push((*position, silence_file));
+        }
+
+        // 合并所有处理后的音频文件和空白片段
         let file_list_path = temp_dir.path().join("file_list.txt");
         let mut file_list_content = String::new();
-        for file in &processed_files {
+
+        // 构建合并列表：空白片段 + 音频片段交替插入
+        let mut all_files: Vec<PathBuf> = Vec::new();
+
+        // 添加起始空白
+        if let Some((_, path)) = silence_files.iter().find(|(p, _)| *p == 0) {
+            all_files.push(path.clone());
+        }
+
+        // 添加音频片段和中间空白
+        for (i, processed_file) in processed_files.iter().enumerate() {
+            all_files.push(processed_file.clone());
+
+            // 在当前位置之后添加空白
+            if let Some((_, path)) = silence_files.iter().find(|(p, _)| *p == i + 1) {
+                all_files.push(path.clone());
+            }
+        }
+
+        // 添加末尾空白
+        if let Some((_, path)) = silence_files.iter().find(|(p, _)| *p == srt_entries.len()) {
+            all_files.push(path.clone());
+        }
+
+        // 写入文件列表
+        for file in all_files {
             let abs_path = if file.exists() {
-                std::fs::canonicalize(file).unwrap_or_else(|_| file.clone())
+                std::fs::canonicalize(&file).unwrap_or_else(|_| file.clone())
             } else {
                 file.clone()
             };
@@ -395,6 +489,45 @@ impl AudioSplitter {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             anyhow::bail!("ffmpeg 合并失败: {}", stderr);
+        }
+
+        Ok(())
+    }
+
+    /// 生成指定时长的空白音频（静音）
+    async fn generate_silence(output_path: &Path, duration_sec: f64) -> Result<()> {
+        if duration_sec <= 0.0 {
+            anyhow::bail!("空白时长必须大于 0");
+        }
+
+        // 使用 ffmpeg 生成空白音频
+        // -f lavfi: 使用 libavfilter 输入
+        // anullsrc: 生成空音频源
+        // -t: 指定时长
+        let output = tokio::process::Command::new("ffmpeg")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-f")
+            .arg("lavfi")
+            .arg("-i")
+            .arg("anullsrc=channel_layout=stereo:sample_rate=44100")
+            .arg("-t")
+            .arg(duration_sec.to_string())
+            .arg("-acodec")
+            .arg("pcm_s16le")
+            .arg("-ar")
+            .arg("44100")
+            .arg("-ac")
+            .arg("2")
+            .arg("-y")
+            .arg(output_path)
+            .output()
+            .await
+            .context("执行 ffmpeg 生成空白音频失败")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            anyhow::bail!("ffmpeg 生成空白音频失败: {}", stderr);
         }
 
         Ok(())
