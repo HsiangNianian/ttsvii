@@ -14,8 +14,8 @@ impl AudioSplitter {
         output_dir: &Path,
         index: u32,
     ) -> Result<PathBuf> {
-        let start_secs = start_time.num_seconds() as f64 
-            + start_time.num_milliseconds() as f64 / 1000.0;
+        let start_secs =
+            start_time.num_seconds() as f64 + start_time.num_milliseconds() as f64 / 1000.0;
         let duration = (end_time - start_time).num_seconds() as f64
             + (end_time - start_time).num_milliseconds() as f64 / 1000.0;
 
@@ -46,19 +46,16 @@ impl AudioSplitter {
     }
 
     /// 合并多个音频文件
-    pub async fn merge_audio(
-        audio_files: &[PathBuf],
-        output_path: &Path,
-    ) -> Result<()> {
+    pub async fn merge_audio(audio_files: &[PathBuf], output_path: &Path) -> Result<()> {
         // 创建文件列表
         let temp_dir = TempDir::new()?;
         let file_list_path = temp_dir.path().join("file_list.txt");
-        
+
         let mut file_list_content = String::new();
         for file in audio_files {
             file_list_content.push_str(&format!("file '{}'\n", file.display()));
         }
-        
+
         tokio::fs::write(&file_list_path, file_list_content).await?;
 
         // 使用 ffmpeg concat 合并

@@ -46,16 +46,11 @@ async fn main() -> Result<()> {
     tokio::fs::create_dir_all(&args.output).await?;
 
     println!("正在解析 SRT 文件...");
-    let srt_entries = srt::SrtParser::parse_file(&args.srt)
-        .context("解析 SRT 文件失败")?;
+    let srt_entries = srt::SrtParser::parse_file(&args.srt).context("解析 SRT 文件失败")?;
     println!("找到 {} 个字幕条目", srt_entries.len());
 
     // 创建任务管理器
-    let task_manager = TaskManager::new(
-        srt_entries,
-        &args.audio,
-        &args.output,
-    )?;
+    let task_manager = TaskManager::new(srt_entries, &args.audio, &args.output)?;
 
     println!("正在切分音频文件...");
     task_manager.prepare_audio_segments(&args.audio).await?;
@@ -68,13 +63,18 @@ async fn main() -> Result<()> {
     let executor = TaskExecutor::new(api_client, args.max_concurrent);
     executor.set_total(task_manager.len() as u64);
 
-    println!("开始处理 {} 个任务（并发数: {}）...", task_manager.len(), args.max_concurrent);
+    println!(
+        "开始处理 {} 个任务（并发数: {}）...",
+        task_manager.len(),
+        args.max_concurrent
+    );
 
     // 执行所有任务
     let tasks = task_manager.get_tasks();
-    let futures: Vec<_> = tasks.iter().map(|task| {
-        executor.execute_task(task.clone())
-    }).collect();
+    let futures: Vec<_> = tasks
+        .iter()
+        .map(|task| executor.execute_task(task.clone()))
+        .collect();
 
     let results = futures::future::join_all(futures).await;
 
@@ -99,10 +99,7 @@ async fn main() -> Result<()> {
     println!("所有任务执行完成，正在合并音频...");
 
     // 收集所有合成的音频文件
-    let mut audio_files: Vec<PathBuf> = tasks
-        .iter()
-        .map(|task| task.output_path.clone())
-        .collect();
+    let mut audio_files: Vec<PathBuf> = tasks.iter().map(|task| task.output_path.clone()).collect();
 
     // 按索引排序
     audio_files.sort();

@@ -40,9 +40,9 @@ impl TaskExecutor {
 
     pub async fn execute_task(&self, task: Task) -> Result<()> {
         let _permit = self.semaphore.acquire().await.unwrap();
-        
+
         let result = self.execute_inner(&task).await;
-        
+
         self.progress.inc(1);
         result
     }
@@ -81,11 +81,7 @@ pub struct TaskManager {
 }
 
 impl TaskManager {
-    pub fn new(
-        srt_entries: Vec<SrtEntry>,
-        _audio_path: &Path,
-        output_dir: &Path,
-    ) -> Result<Self> {
+    pub fn new(srt_entries: Vec<SrtEntry>, _audio_path: &Path, output_dir: &Path) -> Result<Self> {
         let mut tasks = Vec::new();
 
         for entry in srt_entries {
@@ -106,41 +102,38 @@ impl TaskManager {
         Ok(Self { tasks })
     }
 
-    pub async fn prepare_audio_segments(
-        &self,
-        audio_path: &Path,
-    ) -> Result<()> {
+    pub async fn prepare_audio_segments(&self, audio_path: &Path) -> Result<()> {
         // 并行切分所有音频片段
-        let futures: Vec<_> = self.tasks.iter().map(|task| {
-            let audio_path = audio_path.to_path_buf();
-            let speaker_path = task.speaker_audio.clone();
-            let emotion_path = task.emotion_audio.clone();
-            let start = task.entry.start_time;
-            let end = task.entry.end_time;
-            let index = task.entry.index;
+        let futures: Vec<_> = self
+            .tasks
+            .iter()
+            .map(|task| {
+                let audio_path = audio_path.to_path_buf();
+                let speaker_path = task.speaker_audio.clone();
+                let emotion_path = task.emotion_audio.clone();
+                let start = task.entry.start_time;
+                let end = task.entry.end_time;
+                let index = task.entry.index;
 
-            async move {
-                let output_dir = speaker_path.parent().unwrap();
-                
-                // 切分音频片段到临时路径
-                let temp_path = AudioSplitter::split_audio(
-                    &audio_path, 
-                    start, 
-                    end, 
-                    output_dir, 
-                    index
-                ).await?;
-                
-                // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
-                tokio::fs::copy(&temp_path, &speaker_path).await?;
-                tokio::fs::copy(&temp_path, &emotion_path).await?;
-                
-                // 删除临时文件
-                let _ = tokio::fs::remove_file(&temp_path).await;
-                
-                Ok::<(), anyhow::Error>(())
-            }
-        }).collect();
+                async move {
+                    let output_dir = speaker_path.parent().unwrap();
+
+                    // 切分音频片段到临时路径
+                    let temp_path =
+                        AudioSplitter::split_audio(&audio_path, start, end, output_dir, index)
+                            .await?;
+
+                    // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
+                    tokio::fs::copy(&temp_path, &speaker_path).await?;
+                    tokio::fs::copy(&temp_path, &emotion_path).await?;
+
+                    // 删除临时文件
+                    let _ = tokio::fs::remove_file(&temp_path).await;
+
+                    Ok::<(), anyhow::Error>(())
+                }
+            })
+            .collect();
 
         futures::future::try_join_all(futures).await?;
         Ok(())

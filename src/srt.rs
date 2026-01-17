@@ -23,16 +23,15 @@ impl SrtParser {
 
     pub fn parse(content: &str) -> Result<Vec<SrtEntry>> {
         let mut entries = Vec::new();
-        
+
         // 匹配 SRT 条目的正则表达式
         let entry_re = Regex::new(
             r"(?m)^(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*\n((?:.*\n?)+?)(?=\n\d+\s*\n|\Z)"
         ).unwrap();
 
         for cap in entry_re.captures_iter(content) {
-            let index: u32 = cap[1].parse()
-                .with_context(|| "无法解析序号")?;
-            
+            let index: u32 = cap[1].parse().with_context(|| "无法解析序号")?;
+
             let start_h = cap[2].parse::<i64>()?;
             let start_m = cap[3].parse::<i64>()?;
             let start_s = cap[4].parse::<i64>()?;
