@@ -1,7 +1,6 @@
-use anyhow::{Context, Result};
+use anyhow::Result;
 use chrono::Duration;
-use regex::Regex;
-use std::fs;
+use srtlib::{Subtitles, Timestamp};
 use std::path::Path;
 
 #[derive(Debug, Clone)]
@@ -16,64 +15,27 @@ pub struct SrtParser;
 
 impl SrtParser {
     pub fn parse_file<P: AsRef<Path>>(path: P) -> Result<Vec<SrtEntry>> {
-        let content = fs::read_to_string(path.as_ref())
-            .with_context(|| format!("无法读取 SRT 文件: {:?}", path.as_ref()))?;
-        Self::parse(&content)
+        let subtitles = Subtitles::parse_from_file(path.as_ref(), None)
+            .map_err(|e| anyhow::anyhow!("解析 SRT 文件失败: {}", e))?;
+
+        Self::convert_to_entries(subtitles)
     }
 
-    pub fn parse(content: &str) -> Result<Vec<SrtEntry>> {
+    fn convert_to_entries(subtitles: Subtitles) -> Result<Vec<SrtEntry>> {
         let mut entries = Vec::new();
 
-        // 匹配 SRT 条目头部的正则表达式（序号和时间戳）
-        let header_re = Regex::new(
-            r"(?m)^(\d+)\s*\n(\d{2}):(\d{2}):(\d{2}),(\d{3})\s*-->\s*(\d{2}):(\d{2}):(\d{2}),(\d{3})"
-        ).unwrap();
+        for subtitle in subtitles.to_vec() {
+            let index = subtitle.num as u32;
 
-        let mut last_end = 0;
-        let mut matches: Vec<_> = header_re.captures_iter(content).collect();
-
-        for (i, cap) in matches.iter().enumerate() {
-            let index: u32 = cap[1].parse().with_context(|| "无法解析序号")?;
-
-            let start_h = cap[2].parse::<i64>()?;
-            let start_m = cap[3].parse::<i64>()?;
-            let start_s = cap[4].parse::<i64>()?;
-            let start_ms = cap[5].parse::<i64>()?;
-            let start_time = Duration::hours(start_h)
-                + Duration::minutes(start_m)
-                + Duration::seconds(start_s)
-                + Duration::milliseconds(start_ms);
-
-            let end_h = cap[6].parse::<i64>()?;
-            let end_m = cap[7].parse::<i64>()?;
-            let end_s = cap[8].parse::<i64>()?;
-            let end_ms = cap[9].parse::<i64>()?;
-            let end_time = Duration::hours(end_h)
-                + Duration::minutes(end_m)
-                + Duration::seconds(end_s)
-                + Duration::milliseconds(end_ms);
-
-            // 找到时间戳行的结束位置
-            let time_match = cap.get(0).unwrap();
-            let text_start = time_match.end();
-            
-            // 找到下一个条目的开始位置，或者文件结尾
-            let text_end = if i + 1 < matches.len() {
-                matches[i + 1].get(0).unwrap().start()
-            } else {
-                content.len()
-            };
-
-            // 提取文本内容（去除前后的空白行）
-            let text = content[text_start..text_end]
-                .trim()
-                .to_string();
+            // 转换时间戳为 chrono::Duration
+            let start_time = timestamp_to_duration(&subtitle.start_time)?;
+            let end_time = timestamp_to_duration(&subtitle.end_time)?;
 
             entries.push(SrtEntry {
                 index,
                 start_time,
                 end_time,
-                text,
+                text: subtitle.text,
             });
         }
 
@@ -83,6 +45,17 @@ impl SrtParser {
 
         Ok(entries)
     }
+}
+
+/// 将 srtlib 的 Timestamp 转换为 chrono::Duration
+fn timestamp_to_duration(ts: &Timestamp) -> Result<Duration> {
+    let (hours, minutes, seconds, milliseconds) = ts.get();
+    let total_ms = hours as i64 * 3600 * 1000
+        + minutes as i64 * 60 * 1000
+        + seconds as i64 * 1000
+        + milliseconds as i64;
+
+    Ok(Duration::milliseconds(total_ms))
 }
 
 #[cfg(test)]
@@ -101,7 +74,7 @@ This is a test
 ";
         let entries = SrtParser::parse(content).unwrap();
         assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].text, "Hello world");
-        assert_eq!(entries[1].text, "This is a test");
+        assert_eq!(entries[0].text.trim(), "Hello world");
+        assert_eq!(entries[1].text.trim(), "This is a test");
     }
 }
