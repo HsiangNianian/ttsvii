@@ -369,9 +369,8 @@ async fn run_cli_mode(
                 &audio_files,
                 &srt_entries_for_merge,
                 &timed_output,
-                Some(|current, total, msg: String| {
-                    println!("[变速处理] {}/{} - {}", current, total, msg);
-                }),
+                // 不在这里打印日志，让进度条自己显示
+                None::<fn(usize, usize, String)>,
             ),
         )
         .await
