@@ -3,6 +3,7 @@ use anyhow::{Context, Result};
 use chrono::Duration;
 use std::path::{Path, PathBuf};
 use tempfile::TempDir;
+use indicatif::{ProgressBar, ProgressStyle};
 
 pub struct AudioSplitter;
 
