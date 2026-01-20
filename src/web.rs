@@ -1,5 +1,5 @@
-use crate::task::{TaskExecutor, TaskManager};
 use crate::task;
+use crate::task::{TaskExecutor, TaskManager};
 use crate::{api, audio, srt};
 use anyhow::{Context, Result};
 use axum::{
@@ -9,8 +9,8 @@ use axum::{
     Router,
 };
 use serde::{Deserialize, Serialize};
-use std::path::PathBuf;
 use std::collections::HashSet;
+use std::path::PathBuf;
 use std::sync::{
     atomic::{AtomicBool, Ordering},
     Arc,
@@ -335,7 +335,8 @@ impl AppState {
                             }
 
                             batch_num += 1;
-                            let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
+                            let batch_end =
+                                (batch_start + batch_task_count).min(tasks_to_process.len());
                             let batch_tasks = &tasks_to_process[batch_start..batch_end];
 
                             state
@@ -371,7 +372,8 @@ impl AppState {
 
                             let batch_results = futures::future::join_all(futures).await;
 
-                            for ((original_idx, _), result) in batch_tasks.iter().zip(batch_results) {
+                            for ((original_idx, _), result) in batch_tasks.iter().zip(batch_results)
+                            {
                                 if let Err(e) = result {
                                     let err_msg = e.to_string();
                                     if err_msg.contains("文本内容为空")
@@ -425,8 +427,10 @@ impl AppState {
                                         output_path: None,
                                     })
                                     .await;
-                                tokio::time::sleep(std::time::Duration::from_secs(config.rest_duration))
-                                    .await;
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    config.rest_duration,
+                                ))
+                                .await;
                             }
                         }
 
@@ -481,7 +485,8 @@ impl AppState {
                             tokio::time::sleep(std::time::Duration::from_secs(60)).await;
                         }
 
-                        let tasks_to_validate: Vec<(usize, &task::Task)> = if validation_round == 1 {
+                        let tasks_to_validate: Vec<(usize, &task::Task)> = if validation_round == 1
+                        {
                             tasks.iter().enumerate().collect()
                         } else {
                             invalid_audio_indices
@@ -504,7 +509,10 @@ impl AppState {
                                 skipped: skipped.len() as u64,
                                 current_batch: validation_round,
                                 total_batches,
-                                message: format!("开始校验 {} 个音频文件...", tasks_to_validate.len()),
+                                message: format!(
+                                    "开始校验 {} 个音频文件...",
+                                    tasks_to_validate.len()
+                                ),
                                 task_id: Some(uuid_str.clone()),
                                 output_path: None,
                             })
@@ -512,10 +520,14 @@ impl AppState {
 
                         let mut new_invalid_indices = HashSet::new();
                         for (original_idx, task) in tasks_to_validate.iter() {
-                            match audio::AudioSplitter::validate_audio_file(&task.output_path).await {
+                            match audio::AudioSplitter::validate_audio_file(&task.output_path).await
+                            {
                                 Ok(_) => {}
                                 Err(e) => {
-                                    eprintln!("音频文件校验失败 (任务 {}): {}", task.entry.index, e);
+                                    eprintln!(
+                                        "音频文件校验失败 (任务 {}): {}",
+                                        task.entry.index, e
+                                    );
                                     new_invalid_indices.insert(*original_idx);
                                     let _ = tokio::fs::remove_file(&task.output_path).await;
                                 }
@@ -543,7 +555,10 @@ impl AppState {
                                 skipped: skipped.len() as u64,
                                 current_batch: 0,
                                 total_batches,
-                                message: format!("发现 {} 个无效音频，准备重新生成", failed_task_indices.len()),
+                                message: format!(
+                                    "发现 {} 个无效音频，准备重新生成",
+                                    failed_task_indices.len()
+                                ),
                                 task_id: Some(uuid_str.clone()),
                                 output_path: None,
                             })
