@@ -1,7 +1,7 @@
 use crate::api::ApiClient;
 use crate::audio::AudioSplitter;
 use crate::srt::SrtEntry;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};

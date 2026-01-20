@@ -644,18 +644,20 @@ impl AudioSplitter {
         let mut silence_files = Vec::new();
         for (idx, (position, duration_sec)) in silence_segments.iter().enumerate() {
             let silence_file = temp_dir.path().join(format!("silence_{}.wav", idx));
+            let position_desc = if *position == 0 {
+                "起始".to_string()
+            } else if *position == srt_entries.len() {
+                "末尾".to_string()
+            } else {
+                format!("条目{}之后", position)
+            };
+
             println!(
                 "[空白生成] 生成空白片段 {}: {:.3}s ({:.0}ms), 位置: {}",
                 idx,
                 duration_sec,
                 duration_sec * 1000.0,
-                if *position == 0 {
-                    "起始"
-                } else if *position == srt_entries.len() {
-                    "末尾"
-                } else {
-                    &format!("条目{}之后", position)
-                }
+                position_desc
             );
             Self::generate_silence(&silence_file, *duration_sec).await?;
             silence_files.push((*position, silence_file));
