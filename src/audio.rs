@@ -272,6 +272,8 @@ impl AudioSplitter {
             let target_duration_ms = (entry.end_time - entry.start_time).num_milliseconds();
             let target_duration_sec = target_duration_ms as f64 / 1000.0;
 
+            println!("[变速] 任务 {}: SRT目标时长 = {:.3}s ({:.0}ms)", i + 1, target_duration_sec, target_duration_ms);
+
             // 获取音频文件的实际时长
             let probe_output = tokio::process::Command::new("ffprobe")
                 .arg("-v")
@@ -295,8 +297,11 @@ impl AudioSplitter {
                 anyhow::bail!("音频文件时长为 0: {:?}", audio_file);
             }
 
+            println!("[变速] 任务 {}: 实际音频时长 = {:.3}s", i + 1, actual_duration_sec);
+
             // 计算速度调整比例
             let speed_ratio = actual_duration_sec / target_duration_sec;
+            println!("[变速] 任务 {}: 速度比例 = {:.3}x (需要{}倍速)", i + 1, speed_ratio, if speed_ratio > 1.0 { "加速" } else { "减速" });
 
             // 处理后的音频文件路径
             let processed_file = temp_dir.path().join(format!("processed_{:04}.wav", i + 1));
@@ -304,6 +309,7 @@ impl AudioSplitter {
             // 如果速度比例接近 1.0（差异小于 1%），直接复制，否则调整速度
             if (speed_ratio - 1.0).abs() < 0.01 {
                 // 速度几乎不需要调整，直接复制
+                println!("[变速] 任务 {}: 速度比例接近1.0，直接复制（无需变速）", i + 1);
                 tokio::fs::copy(audio_file, &processed_file).await?;
                 processed_files.push(processed_file);
             } else {
@@ -330,6 +336,8 @@ impl AudioSplitter {
                     remaining_ratio /= 0.5;
                 }
                 tempo_chain.push(remaining_ratio);
+                
+                println!("[变速] 任务 {}: atempo链 = {:?} (共{}个)", i + 1, tempo_chain, tempo_chain.len());
 
                 // 构建滤镜字符串
                 let filter_complex =
@@ -390,10 +398,14 @@ impl AudioSplitter {
                     let processed_duration_str = String::from_utf8_lossy(&processed_probe_output.stdout);
                     if let Ok(processed_duration_sec) = processed_duration_str.trim().parse::<f64>() {
                         let duration_diff = (processed_duration_sec - target_duration_sec).abs();
+                        println!("[变速] 任务 {}: 变速后时长 = {:.3}s, 目标 = {:.3}s, 差值 = {:.3}s ({:.0}ms)", 
+                            i + 1, processed_duration_sec, target_duration_sec, duration_diff, duration_diff * 1000.0);
+                        
                         // 如果差值超过 50 毫秒，需要进一步调整
                         if duration_diff > 0.05 {
                             // 计算需要再次调整的比例
                             let correction_ratio = target_duration_sec / processed_duration_sec;
+                            println!("[变速] 任务 {}: 需要二次修正，修正比例 = {:.3}x", i + 1, correction_ratio);
                             
                             // 如果修正比例在合理范围内（0.5-2.0），进行二次调整
                             if correction_ratio >= 0.5 && correction_ratio <= 2.0 {
@@ -420,17 +432,41 @@ impl AudioSplitter {
                                     .context("执行 ffmpeg 时长修正失败")?;
 
                                 if correction_output.status.success() {
+                                    // 验证修正后的时长
+                                    let corrected_probe = tokio::process::Command::new("ffprobe")
+                                        .arg("-v")
+                                        .arg("error")
+                                        .arg("-show_entries")
+                                        .arg("format=duration")
+                                        .arg("-of")
+                                        .arg("default=noprint_wrappers=1:nokey=1")
+                                        .arg(&corrected_file)
+                                        .output()
+                                        .await?;
+                                    
+                                    if corrected_probe.status.success() {
+                                        let corrected_duration_str = String::from_utf8_lossy(&corrected_probe.stdout);
+                                        if let Ok(corrected_duration_sec) = corrected_duration_str.trim().parse::<f64>() {
+                                            let final_diff = (corrected_duration_sec - target_duration_sec).abs();
+                                            println!("[变速] 任务 {}: 二次修正后时长 = {:.3}s, 目标 = {:.3}s, 最终差值 = {:.3}s ({:.0}ms)", 
+                                                i + 1, corrected_duration_sec, target_duration_sec, final_diff, final_diff * 1000.0);
+                                        }
+                                    }
+                                    
                                     // 使用修正后的文件
                                     processed_files.push(corrected_file);
                                 } else {
+                                    println!("[变速] 任务 {}: 二次修正失败，使用原始变速结果", i + 1);
                                     // 修正失败，使用原始变速后的文件
                                     processed_files.push(processed_file);
                                 }
                             } else {
+                                println!("[变速] 任务 {}: 修正比例超出范围 ({:.3}), 使用原始变速结果", i + 1, correction_ratio);
                                 // 修正比例超出范围，使用原始变速后的文件
                                 processed_files.push(processed_file);
                             }
                         } else {
+                            println!("[变速] 任务 {}: ✅ 时长准确，无需修正", i + 1);
                             // 时长已经足够准确，直接使用
                             processed_files.push(processed_file);
                         }
@@ -452,7 +488,11 @@ impl AudioSplitter {
         progress.finish_with_message(finish_msg);
 
         // 计算空白时间段并生成空白音频片段
+        println!("\n[空白计算] 开始计算空白时间段...");
+        println!("[空白计算] 原始音频总时长: {:.3}s ({:.0}ms)", original_duration_sec, original_duration_sec * 1000.0);
+        
         let mut silence_segments = Vec::new();
+        let mut total_silence_sec = 0.0;
 
         // 1. 起始空白：0 到第一句话的开始时间
         if let Some(first_entry) = srt_entries.first() {
@@ -460,10 +500,16 @@ impl AudioSplitter {
             if start_silence_ms > 0 {
                 let start_silence_sec = start_silence_ms as f64 / 1000.0;
                 silence_segments.push((0, start_silence_sec)); // 0 表示在开头
+                total_silence_sec += start_silence_sec;
+                println!("[空白计算] 起始空白: {:.3}s ({:.0}ms) [0 -> 条目1开始]", start_silence_sec, start_silence_ms);
+            } else {
+                println!("[空白计算] 起始空白: 0s (第一句话从0秒开始)");
             }
         }
 
         // 2. 中间空白：每句话之间的空白
+        let mut total_gap_sec = 0.0;
+        let mut gap_count = 0;
         for i in 0..(srt_entries.len() - 1) {
             let current_end = srt_entries[i].end_time.num_milliseconds();
             let next_start = srt_entries[i + 1].start_time.num_milliseconds();
@@ -472,8 +518,14 @@ impl AudioSplitter {
             if gap_ms > 0 {
                 let gap_sec = gap_ms as f64 / 1000.0;
                 silence_segments.push((i + 1, gap_sec)); // i+1 表示在第 i+1 个音频之后
+                total_gap_sec += gap_sec;
+                gap_count += 1;
+                println!("[空白计算] 中间空白 {}: {:.3}s ({:.0}ms) [条目{}结束 -> 条目{}开始]", 
+                    gap_count, gap_sec, gap_ms, i + 1, i + 2);
             }
         }
+        total_silence_sec += total_gap_sec;
+        println!("[空白计算] 中间空白总计: {:.3}s ({:.0}ms), 共{}段", total_gap_sec, total_gap_sec * 1000.0, gap_count);
 
         // 3. 末尾空白：最后一句话的结束时间到原始音频总时长
         if let Some(last_entry) = srt_entries.last() {
@@ -484,16 +536,41 @@ impl AudioSplitter {
             if end_silence_ms > 0 {
                 let end_silence_sec = end_silence_ms as f64 / 1000.0;
                 silence_segments.push((srt_entries.len(), end_silence_sec)); // 在最后
+                total_silence_sec += end_silence_sec;
+                println!("[空白计算] 末尾空白: {:.3}s ({:.0}ms) [最后条目结束 -> 原始音频结束]", end_silence_sec, end_silence_ms);
+            } else {
+                println!("[空白计算] 末尾空白: 0s (最后条目结束时间 = 原始音频结束时间)");
             }
         }
+        
+        println!("[空白计算] 空白总时长: {:.3}s ({:.0}ms), 共{}段", total_silence_sec, total_silence_sec * 1000.0, silence_segments.len());
+        
+        // 计算所有音频片段的总时长（从SRT）
+        let total_audio_duration_ms: i64 = srt_entries.iter()
+            .map(|e| (e.end_time - e.start_time).num_milliseconds())
+            .sum();
+        let total_audio_duration_sec = total_audio_duration_ms as f64 / 1000.0;
+        println!("[空白计算] SRT音频总时长: {:.3}s ({:.0}ms)", total_audio_duration_sec, total_audio_duration_ms);
+        
+        let calculated_total = total_silence_sec + total_audio_duration_sec;
+        println!("[空白计算] 计算总时长 = 空白({:.3}s) + 音频({:.3}s) = {:.3}s", 
+            total_silence_sec, total_audio_duration_sec, calculated_total);
+        println!("[空白计算] 原始音频时长: {:.3}s, 差值: {:.3}s ({:.0}ms)", 
+            original_duration_sec, (calculated_total - original_duration_sec).abs(), 
+            (calculated_total - original_duration_sec).abs() * 1000.0);
 
         // 生成空白音频文件
+        println!("\n[空白生成] 开始生成空白音频片段...");
         let mut silence_files = Vec::new();
         for (idx, (position, duration_sec)) in silence_segments.iter().enumerate() {
             let silence_file = temp_dir.path().join(format!("silence_{}.wav", idx));
+            println!("[空白生成] 生成空白片段 {}: {:.3}s ({:.0}ms), 位置: {}", 
+                idx, duration_sec, duration_sec * 1000.0, 
+                if *position == 0 { "起始" } else if *position == srt_entries.len() { "末尾" } else { &format!("条目{}之后", position) });
             Self::generate_silence(&silence_file, *duration_sec).await?;
             silence_files.push((*position, silence_file));
         }
+        println!("[空白生成] 完成，共生成{}个空白片段", silence_files.len());
 
         // 合并所有处理后的音频文件和空白片段
         let file_list_path = temp_dir.path().join("file_list.txt");
