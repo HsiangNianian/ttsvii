@@ -448,6 +448,10 @@ impl AppState {
                         if failed_task_indices.is_empty() {
                             break;
                         }
+
+                        if retry_round >= (config.retry_count + 1) {
+                            break;
+                        }
                     }
 
                     executor.finish();
@@ -544,6 +548,12 @@ impl AppState {
                                 output_path: None,
                             })
                             .await;
+                    }
+                }
+
+                if !failed_task_indices.is_empty() {
+                    for idx in failed_task_indices {
+                        errors.push((idx, "达到重试上限".to_string()));
                     }
                 }
 
