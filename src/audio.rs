@@ -333,6 +333,53 @@ impl AudioSplitter {
                 );
                 tokio::fs::copy(audio_file, &processed_file).await?;
                 processed_files.push(processed_file);
+            } else if speed_ratio < 1.0 {
+                // 生成的音频比原来短，不变速，而是追加静音
+                let silence_duration_sec = target_duration_sec - actual_duration_sec;
+                println!(
+                    "[变速] 任务 {}: 音频较短（{:.3}s < {:.3}s），追加 {:.3}s 静音而非变速",
+                    i + 1,
+                    actual_duration_sec,
+                    target_duration_sec,
+                    silence_duration_sec
+                );
+
+                // 使用 ffmpeg 追加静音
+                let silence_filter = format!("apad=pad_dur={:.3}", silence_duration_sec);
+                
+                let output = tokio::process::Command::new("ffmpeg")
+                    .arg("-loglevel")
+                    .arg("error")
+                    .arg("-i")
+                    .arg(audio_file)
+                    .arg("-af")
+                    .arg(&silence_filter)
+                    .arg("-acodec")
+                    .arg("pcm_s16le")
+                    .arg("-ar")
+                    .arg("44100")
+                    .arg("-ac")
+                    .arg("2")
+                    .arg("-y")
+                    .arg(&processed_file)
+                    .output()
+                    .await
+                    .context("执行 ffmpeg 追加静音失败")?;
+
+                if !output.status.success() {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    anyhow::bail!(
+                        "ffmpeg 追加静音失败 (文件: {:?}): {}",
+                        audio_file,
+                        stderr
+                    );
+                }
+
+                println!(
+                    "[变速] 任务 {}: ✅ 静音追加完成",
+                    i + 1
+                );
+                processed_files.push(processed_file);
             } else {
                 // 使用 atempo 滤镜调整速度
                 // atempo 的范围是 0.5 到 2.0，如果超出范围需要链式使用多个 atempo
