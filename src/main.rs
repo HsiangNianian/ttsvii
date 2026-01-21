@@ -66,6 +66,14 @@ async fn main() -> Result<()> {
 
     // 如果指定了 resume，则执行恢复任务
     if let Some(uuid) = args.resume {
+        // 恢复任务模式下，SRT 文件是必须的
+        let srt = args
+            .srt
+            .clone()
+            .context("恢复任务必须提供 SRT 文件路径 (-s/--srt)")?;
+        // 原始音频文件是可选的（用于变速）
+        let audio = args.audio.clone();
+
         return resume_cli_task(
             uuid,
             args.api_url,
@@ -74,6 +82,8 @@ async fn main() -> Result<()> {
             args.batch_size,
             args.rest_duration,
             args.retry_count,
+            audio,
+            srt,
         )
         .await;
     }
@@ -198,13 +208,6 @@ async fn run_cli_mode(
                 );
             }
         }
-
-        // 保存任务清单到临时目录，以便后续恢复
-        let manifest = task::TaskManifest {
-            entries: srt_entries.clone(),
-            audio_path: audio.clone(),
-        };
-        manifest.save(&tmp_dir.join("tasks.json"))?;
 
         // 创建任务管理器
         let task_manager = TaskManager::new(srt_entries, &audio, &tmp_dir, &output_task_dir)?;
@@ -551,6 +554,8 @@ async fn resume_cli_task(
     batch_size: usize,
     rest_duration: u64,
     retry_count: u32,
+    audio: Option<PathBuf>,
+    srt: PathBuf,
 ) -> Result<()> {
     println!("正在尝试恢复任务: {}", uuid);
     let uuid_str = uuid.clone();
@@ -568,23 +573,26 @@ async fn resume_cli_task(
         tokio::fs::create_dir_all(&output_task_dir).await?;
     }
 
-    // 2. 加载清单
-    let manifest_path = tmp_dir.join("tasks.json");
-    if !manifest_path.exists() {
-        anyhow::bail!(
-            "未找到任务清单文件 (tasks.json)，无法恢复任务。只有新版本的程序创建的任务才支持恢复。"
-        );
-    }
-    let manifest = task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
+    // 2. 解析 SRT 文件重建任务列表
+    println!("正在解析 SRT 文件...");
+    let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
 
-    let srt_entries = manifest.entries;
-    let audio_path = manifest.audio_path;
+    // 按索引排序
+    // srt_entries 应该是已经按解析顺序排好的，但为了保险起见
+    // 注意：SrtParser 内部已经做了排序和规范化
 
-    println!("成功加载任务清单: {} 个条目", srt_entries.len());
+    println!("成功解析 SRT 文件: {} 个条目", srt_entries.len());
 
     // 3. 构建 TaskManager
-    let task_manager =
-        TaskManager::new(srt_entries.clone(), &audio_path, &tmp_dir, &output_task_dir)?;
+    // TaskManager 需要 audio_path 来构建 Task，但实际上 resume 模式下主要用 tmp_dir 和输出路径
+    // 我们可以传入一个空的 PathBuf 或者实际的 audio path（如果存在）
+    let dummy_audio_path = audio.clone().unwrap_or_else(|| PathBuf::from(""));
+    let task_manager = TaskManager::new(
+        srt_entries.clone(),
+        &dummy_audio_path,
+        &tmp_dir,
+        &output_task_dir,
+    )?;
 
     // 4. 执行剩余任务
     let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
@@ -595,11 +603,22 @@ async fn resume_cli_task(
     // 找出未完成的任务
     let mut initial_pending_indices = Vec::new();
     for (idx, task) in tasks.iter().enumerate() {
-        let exists = match tokio::fs::metadata(&task.output_path).await {
+        // 检查 tmp 音频是否存在
+        if !task.tmp_audio.exists() {
+            // 如果 tmp 音频不存在，说明切分未完成或文件丢失，无法进行推理
+            // 在 resume 模式下，我们跳过这些无法处理的任务，或者报错？
+            // 根据用户需求，只需要处理 tmp 中有的
+            // eprintln!("警告: 任务 {} 缺少临时切分音频，跳过", task.entry.index);
+            continue;
+        }
+
+        // 检查 output 音频是否存在且有效
+        let completed = match tokio::fs::metadata(&task.output_path).await {
             Ok(m) => m.len() > 0,
             Err(_) => false,
         };
-        if !exists {
+
+        if !completed {
             initial_pending_indices.push(idx);
         }
     }
@@ -764,24 +783,28 @@ async fn resume_cli_task(
     println!("完成！原始合并音频已保存到: {}", final_output.display());
 
     // 变速合并
-    if audio_path.exists() {
-        let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-        println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
-        tokio::time::timeout(
-            std::time::Duration::from_secs(1800),
-            audio::AudioSplitter::merge_audio_with_timing(
-                &audio_files,
-                &srt_entries_for_merge,
-                &timed_output,
-                &audio_path,
-                None::<fn(usize, usize, String)>,
-            ),
-        )
-        .await
-        .context("合并变速音频超时")??;
-        println!("完成！变速合并音频已保存到: {}", timed_output.display());
+    if let Some(audio_path) = audio {
+        if audio_path.exists() {
+            let timed_output = output.join(format!("{}_timed.wav", uuid_str));
+            println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1800),
+                audio::AudioSplitter::merge_audio_with_timing(
+                    &audio_files,
+                    &srt_entries_for_merge,
+                    &timed_output,
+                    &audio_path,
+                    None::<fn(usize, usize, String)>,
+                ),
+            )
+            .await
+            .context("合并变速音频超时")??;
+            println!("完成！变速合并音频已保存到: {}", timed_output.display());
+        } else {
+            println!("指定的原始音频文件不存在: {:?}，跳过变速合并。", audio_path);
+        }
     } else {
-        println!("找不到原始音频文件，跳过变速合并步骤。");
+        println!("未提供原始音频文件，跳过变速合并步骤。");
     }
 
     Ok(())

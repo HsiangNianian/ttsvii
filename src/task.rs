@@ -3,7 +3,7 @@ use crate::audio::AudioSplitter;
 use crate::srt::SrtEntry;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
-use serde::{Deserialize, Serialize};
+// use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -12,29 +12,8 @@ use tokio::sync::Semaphore;
 #[derive(Clone)]
 pub struct Task {
     pub entry: SrtEntry,
-    pub speaker_audio: PathBuf,
-    pub emotion_audio: PathBuf,
+    pub tmp_audio: PathBuf,
     pub output_path: PathBuf,
-}
-
-#[derive(Serialize, Deserialize)]
-pub struct TaskManifest {
-    pub entries: Vec<SrtEntry>,
-    pub audio_path: PathBuf,
-}
-
-impl TaskManifest {
-    pub fn save(&self, path: &Path) -> Result<()> {
-        let file = std::fs::File::create(path)?;
-        serde_json::to_writer_pretty(file, self)?;
-        Ok(())
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-        let file = std::fs::File::open(path)?;
-        let manifest = serde_json::from_reader(file)?;
-        Ok(manifest)
-    }
 }
 
 pub struct TaskExecutor {
@@ -120,20 +99,20 @@ impl TaskExecutor {
         }
 
         // 验证音频文件是否存在且有效
-        if !task.speaker_audio.exists() {
-            anyhow::bail!("音频文件不存在: {:?}", task.speaker_audio);
+        if !task.tmp_audio.exists() {
+            anyhow::bail!("音频文件不存在: {:?}", task.tmp_audio);
         }
 
-        let speaker_size = tokio::fs::metadata(&task.speaker_audio).await?.len();
+        let speaker_size = tokio::fs::metadata(&task.tmp_audio).await?.len();
         // WAV 文件头部至少 44 字节，如果文件太小说明没有实际音频数据
         if speaker_size == 0 {
-            anyhow::bail!("音频文件为空: {:?}", task.speaker_audio);
+            anyhow::bail!("音频文件为空: {:?}", task.tmp_audio);
         }
         if speaker_size <= 44 {
             anyhow::bail!(
                 "音频文件无效（文件大小: {} 字节，可能只有文件头）: {:?}",
                 speaker_size,
-                task.speaker_audio
+                task.tmp_audio
             );
         }
 
@@ -142,8 +121,8 @@ impl TaskExecutor {
             .api_client
             .synthesize(
                 text,
-                Some(&task.speaker_audio),
-                Some(&task.emotion_audio),
+                Some(&task.tmp_audio),
+                Some(&task.tmp_audio),
                 None,
                 None,
                 None,
@@ -192,15 +171,13 @@ impl TaskManager {
             }
 
             // 切分的音频文件放到临时目录
-            let speaker_audio = tmp_dir.join(format!("speaker_{}.wav", entry.index));
-            let emotion_audio = tmp_dir.join(format!("emotion_{}.wav", entry.index));
+            let tmp_audio = tmp_dir.join(format!("{}.wav", entry.index));
             // 合成的音频文件放到输出目录
-            let output_path = output_dir.join(format!("synthesized_{}.wav", entry.index));
+            let output_path = output_dir.join(format!("{}.wav", entry.index));
 
             tasks.push(Task {
                 entry,
-                speaker_audio,
-                emotion_audio,
+                tmp_audio,
                 output_path,
             });
         }
@@ -233,8 +210,7 @@ impl TaskManager {
             .iter()
             .map(|task| {
                 let audio_path = audio_path.to_path_buf();
-                let speaker_path = task.speaker_audio.clone();
-                let emotion_path = task.emotion_audio.clone();
+                let tmp_audio = task.tmp_audio.clone();
                 let start = task.entry.start_time;
                 let end = task.entry.end_time;
                 let index = task.entry.index;
@@ -246,7 +222,7 @@ impl TaskManager {
                     let _permit = semaphore.acquire().await.unwrap();
 
                     let result = async {
-                        let output_dir = speaker_path.parent().unwrap();
+                        let output_dir = tmp_audio.parent().unwrap();
 
                         // 切分音频片段到临时文件
                         let temp_path =
@@ -264,8 +240,7 @@ impl TaskManager {
                         }
 
                         // 复制到 speaker 和 emotion 路径（使用相同的音频片段）
-                        tokio::fs::copy(&temp_path, &speaker_path).await?;
-                        tokio::fs::copy(&temp_path, &emotion_path).await?;
+                        tokio::fs::copy(&temp_path, &tmp_audio).await?;
 
                         // 删除临时切分文件（speaker 和 emotion 文件保留在 tmp 目录，任务完成后统一删除）
                         let _ = tokio::fs::remove_file(&temp_path).await;

@@ -52,6 +52,8 @@ pub struct ResumeConfig {
     pub uuid: String,
     pub api_url: String,
     pub output: String,
+    pub srt: String,
+    pub audio: Option<String>,
     pub max_concurrent: usize,
     pub batch_size: usize,
     pub rest_duration: u64,
@@ -210,15 +212,6 @@ impl AppState {
                         output_path: None,
                     })
                     .await;
-
-                // 保存任务清单到临时目录，以便后续恢复
-                let manifest = task::TaskManifest {
-                    entries: srt_entries.clone(),
-                    audio_path: PathBuf::from(&config.audio),
-                };
-                if let Err(e) = manifest.save(&tmp_dir.join("tasks.json")) {
-                    eprintln!("警告: 保存任务清单失败: {}", e);
-                }
 
                 // 创建任务管理器
                 let task_manager = TaskManager::new(
@@ -864,15 +857,16 @@ impl AppState {
                     tokio::fs::create_dir_all(&output_task_dir).await?;
                 }
 
-                let manifest_path = tmp_dir.join("tasks.json");
-                if !manifest_path.exists() {
-                    anyhow::bail!("任务清单不存在");
-                }
+                // 从 config 中获取 SRT 文件路径并解析
+                let srt_entries = srt::SrtParser::parse_file(&PathBuf::from(&config.srt))
+                    .context("解析 SRT 文件失败")?;
 
-                let manifest =
-                    task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
-                let srt_entries = manifest.entries;
-                let audio_path = manifest.audio_path;
+                // 获取音频路径（可选）
+                let audio_path = config
+                    .audio
+                    .as_ref()
+                    .map(PathBuf::from)
+                    .unwrap_or_else(PathBuf::new);
 
                 state
                     .update_status(TaskStatus {
@@ -884,7 +878,7 @@ impl AppState {
                         skipped: 0,
                         current_batch: 0,
                         total_batches: 0,
-                        message: format!("加载成功: {} 个条目", srt_entries.len()),
+                        message: format!("解析成功: {} 个条目", srt_entries.len()),
                         task_id: Some(uuid_str.clone()),
                         output_path: None,
                     })
@@ -905,6 +899,10 @@ impl AppState {
 
                 let mut initial_pending_indices = Vec::new();
                 for (idx, task) in tasks.iter().enumerate() {
+                    // 检查临时切分音频是否存在
+                    if !task.tmp_audio.exists() {
+                        continue;
+                    }
                     let exists = match tokio::fs::metadata(&task.output_path).await {
                         Ok(m) => m.len() > 0,
                         Err(_) => false,
