@@ -869,7 +869,8 @@ impl AppState {
                     anyhow::bail!("任务清单不存在");
                 }
 
-                let manifest = task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
+                let manifest =
+                    task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
                 let srt_entries = manifest.entries;
                 let audio_path = manifest.audio_path;
 
@@ -889,12 +890,8 @@ impl AppState {
                     })
                     .await;
 
-                let task_manager = TaskManager::new(
-                    srt_entries.clone(),
-                    &audio_path,
-                    &tmp_dir,
-                    &output_task_dir,
-                )?;
+                let task_manager =
+                    TaskManager::new(srt_entries.clone(), &audio_path, &tmp_dir, &output_task_dir)?;
 
                 let api_client = Arc::new(api::ApiClient::new(config.api_url.clone()));
                 let executor = Arc::new(TaskExecutor::new(

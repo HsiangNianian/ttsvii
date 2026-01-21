@@ -74,7 +74,8 @@ async fn main() -> Result<()> {
             args.batch_size,
             args.rest_duration,
             args.retry_count,
-        ).await;
+        )
+        .await;
     }
 
     // 如果没有提供 audio 和 srt 参数，或者明确指定了 --webui，则启动 Web UI
@@ -570,7 +571,9 @@ async fn resume_cli_task(
     // 2. 加载清单
     let manifest_path = tmp_dir.join("tasks.json");
     if !manifest_path.exists() {
-        anyhow::bail!("未找到任务清单文件 (tasks.json)，无法恢复任务。只有新版本的程序创建的任务才支持恢复。");
+        anyhow::bail!(
+            "未找到任务清单文件 (tasks.json)，无法恢复任务。只有新版本的程序创建的任务才支持恢复。"
+        );
     }
     let manifest = task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
 
@@ -580,7 +583,8 @@ async fn resume_cli_task(
     println!("成功加载任务清单: {} 个条目", srt_entries.len());
 
     // 3. 构建 TaskManager
-    let task_manager = TaskManager::new(srt_entries.clone(), &audio_path, &tmp_dir, &output_task_dir)?;
+    let task_manager =
+        TaskManager::new(srt_entries.clone(), &audio_path, &tmp_dir, &output_task_dir)?;
 
     // 4. 执行剩余任务
     let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
@@ -600,7 +604,12 @@ async fn resume_cli_task(
         }
     }
 
-    println!("总任务数: {} | 已完成: {} | 待处理: {}", tasks.len(), tasks.len() - initial_pending_indices.len(), initial_pending_indices.len());
+    println!(
+        "总任务数: {} | 已完成: {} | 待处理: {}",
+        tasks.len(),
+        tasks.len() - initial_pending_indices.len(),
+        initial_pending_indices.len()
+    );
 
     if initial_pending_indices.is_empty() {
         println!("所有任务均已完成，直接进行合并步骤。");
@@ -624,7 +633,10 @@ async fn resume_cli_task(
             }
 
             let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
-                initial_pending_indices.iter().map(|&idx| (idx, &tasks[idx])).collect()
+                initial_pending_indices
+                    .iter()
+                    .map(|&idx| (idx, &tasks[idx]))
+                    .collect()
             } else {
                 failed_task_indices
                     .iter()
@@ -663,9 +675,7 @@ async fn resume_cli_task(
                     .map(|(_, task)| {
                         let task = (*task).clone();
                         let executor = executor.clone();
-                        async move {
-                            executor.execute_task(task).await
-                        }
+                        async move { executor.execute_task(task).await }
                     })
                     .collect();
 
@@ -674,7 +684,9 @@ async fn resume_cli_task(
                 let (success, failure) = executor.get_stats();
                 println!(
                     "实时统计: 进度/{} | 成功: {} | 失败: {}",
-                     tasks_to_process.len(), success, failure
+                    tasks_to_process.len(),
+                    success,
+                    failure
                 );
 
                 if batch_end < tasks_to_process.len() {
@@ -686,18 +698,18 @@ async fn resume_cli_task(
             let mut new_failed_indices = HashSet::new();
             for (original_idx, _) in tasks_to_process.iter() {
                 if !tasks[*original_idx].output_path.exists() {
-                     new_failed_indices.insert(*original_idx);
+                    new_failed_indices.insert(*original_idx);
                 }
             }
             failed_task_indices = new_failed_indices;
 
-             if failed_task_indices.is_empty() && retry_round == 1 {
-                 println!("\n本轮所有任务都已完成！");
-                 break;
-             }
-             if failed_task_indices.is_empty() {
-                 break;
-             }
+            if failed_task_indices.is_empty() && retry_round == 1 {
+                println!("\n本轮所有任务都已完成！");
+                break;
+            }
+            if failed_task_indices.is_empty() {
+                break;
+            }
         }
 
         executor.finish();
@@ -712,13 +724,16 @@ async fn resume_cli_task(
 
     for task in sorted_tasks {
         if task.output_path.exists() {
-             // 简单检查文件大小
+            // 简单检查文件大小
             let metadata = tokio::fs::metadata(&task.output_path).await?;
             if metadata.len() > 44 {
                 audio_files.push(task.output_path.clone());
                 srt_entries_for_merge.push(task.entry.clone());
             } else {
-                 eprintln!("警告: 任务 {} 输出文件无效 (过小)，跳过合并", task.entry.index);
+                eprintln!(
+                    "警告: 任务 {} 输出文件无效 (过小)，跳过合并",
+                    task.entry.index
+                );
             }
         } else {
             eprintln!("警告: 任务 {} 输出文件缺失，跳过合并", task.entry.index);
@@ -733,7 +748,11 @@ async fn resume_cli_task(
 
     // 合并音频
     let final_output = output.join(format!("{}.wav", uuid_str));
-    println!("开始合并 {} 个音频文件到: {}", audio_files.len(), final_output.display());
+    println!(
+        "开始合并 {} 个音频文件到: {}",
+        audio_files.len(),
+        final_output.display()
+    );
 
     tokio::time::timeout(
         std::time::Duration::from_secs(1800),
@@ -746,9 +765,9 @@ async fn resume_cli_task(
 
     // 变速合并
     if audio_path.exists() {
-         let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-         println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
-         tokio::time::timeout(
+        let timed_output = output.join(format!("{}_timed.wav", uuid_str));
+        println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
+        tokio::time::timeout(
             std::time::Duration::from_secs(1800),
             audio::AudioSplitter::merge_audio_with_timing(
                 &audio_files,
@@ -760,9 +779,9 @@ async fn resume_cli_task(
         )
         .await
         .context("合并变速音频超时")??;
-         println!("完成！变速合并音频已保存到: {}", timed_output.display());
+        println!("完成！变速合并音频已保存到: {}", timed_output.display());
     } else {
-         println!("找不到原始音频文件，跳过变速合并步骤。");
+        println!("找不到原始音频文件，跳过变速合并步骤。");
     }
 
     Ok(())
