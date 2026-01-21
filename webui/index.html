@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>语音克隆批量处理</title>
+    <title>TTSVII - 语音克隆批量处理工具</title>
     <style>
         :root {
             --bg: #f7f7f9;
@@ -15,6 +15,7 @@
             --primary-dark: #1552b6;
             --error: #c0392b;
             --success: #1e8449;
+            --warning: #f39c12;
         }
 
         * { box-sizing: border-box; }
@@ -24,87 +25,369 @@
             font-family: "Segoe UI", "Helvetica Neue", Arial, sans-serif;
             background: var(--bg);
             color: var(--text);
+            line-height: 1.5;
         }
 
         header {
-            margin-bottom: 16px;
+            margin-bottom: 24px;
+            padding-bottom: 16px;
+            border-bottom: 2px solid var(--border);
         }
 
-        h1 { font-size: 22px; margin: 0 0 6px 0; }
-        p.desc { margin: 0; color: var(--muted); }
+        h1 { 
+            font-size: 28px; 
+            margin: 0 0 8px 0;
+            font-weight: 600;
+        }
+        p.desc { 
+            margin: 0; 
+            color: var(--muted); 
+            font-size: 14px;
+        }
+
+        /* Tab Styles */
+        .tabs {
+            display: flex;
+            gap: 8px;
+            margin-bottom: 16px;
+            border-bottom: 2px solid var(--border);
+        }
+
+        .tab-btn {
+            padding: 12px 24px;
+            background: transparent;
+            border: none;
+            border-bottom: 3px solid transparent;
+            font-size: 15px;
+            font-weight: 500;
+            color: var(--muted);
+            cursor: pointer;
+            transition: all 0.2s ease;
+        }
+
+        .tab-btn:hover {
+            color: var(--text);
+            background: rgba(31, 111, 235, 0.05);
+        }
+
+        .tab-btn.active {
+            color: var(--primary);
+            border-bottom-color: var(--primary);
+        }
+
+        .tab-content {
+            display: none;
+        }
+
+        .tab-content.active {
+            display: block;
+        }
 
         .layout {
             display: grid;
-            grid-template-columns: 1.2fr 0.8fr;
-            gap: 16px;
+            grid-template-columns: 1fr 400px;
+            gap: 20px;
         }
 
         .panel {
             background: var(--panel);
             border: 1px solid var(--border);
             border-radius: 8px;
-            padding: 16px;
-            box-shadow: 0 6px 12px rgba(0,0,0,0.03);
+            padding: 20px;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.04);
         }
 
         .panel h2 {
-            margin: 0 0 12px 0;
-            font-size: 16px;
+            margin: 0 0 16px 0;
+            font-size: 18px;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .panel h2::before {
+            content: '';
+            width: 4px;
+            height: 18px;
+            background: var(--primary);
+            border-radius: 2px;
         }
 
         .grid-2 {
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-            gap: 12px;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 16px;
         }
 
-        label { font-size: 13px; color: var(--muted); display: block; margin-bottom: 6px; }
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-group.full {
+            grid-column: span 2;
+        }
+
+        label { 
+            font-size: 13px; 
+            font-weight: 500;
+            color: var(--text); 
+            display: block; 
+            margin-bottom: 8px; 
+        }
+
+        label .required {
+            color: var(--error);
+            margin-left: 2px;
+        }
+
         input[type="text"], input[type="number"], input[type="file"] {
             width: 100%;
-            padding: 10px;
+            padding: 10px 12px;
             border: 1px solid var(--border);
             border-radius: 6px;
             font-size: 14px;
             color: var(--text);
             background: #fff;
+            transition: border-color 0.2s ease;
         }
 
-        .hint { font-size: 12px; color: var(--muted); margin-top: 4px; }
+        input[type="text"]:focus, input[type="number"]:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(31, 111, 235, 0.1);
+        }
 
-        .actions { display: flex; gap: 10px; margin-top: 12px; }
+        .hint { 
+            font-size: 12px; 
+            color: var(--muted); 
+            margin-top: 6px; 
+            display: flex;
+            align-items: start;
+            gap: 4px;
+        }
+
+        .hint::before {
+            content: 'ℹ';
+            font-size: 11px;
+            opacity: 0.7;
+        }
+
+        .actions { 
+            display: flex; 
+            gap: 12px; 
+            margin-top: 20px; 
+        }
+
         button {
             flex: 1;
-            padding: 12px;
+            padding: 12px 20px;
             border-radius: 6px;
             border: 1px solid transparent;
             font-size: 15px;
+            font-weight: 500;
             cursor: pointer;
-            transition: background 0.2s ease, transform 0.1s ease;
+            transition: all 0.2s ease;
         }
-        button:disabled { opacity: 0.6; cursor: not-allowed; }
-        .btn-primary { background: var(--primary); color: #fff; }
-        .btn-primary:hover:not(:disabled) { background: var(--primary-dark); }
-        .btn-secondary { background: #ececf1; color: var(--text); border-color: var(--border); }
-        .btn-secondary:hover:not(:disabled) { background: #e1e1e8; }
 
-        .status-row { display: flex; justify-content: space-between; margin: 6px 0; font-size: 14px; }
-        .badge {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 999px;
+        button:disabled { 
+            opacity: 0.5; 
+            cursor: not-allowed; 
+        }
+
+        .btn-primary { 
+            background: var(--primary); 
+            color: #fff; 
+            border-color: var(--primary);
+        }
+
+        .btn-primary:hover:not(:disabled) { 
+            background: var(--primary-dark); 
+            transform: translateY(-1px);
+            box-shadow: 0 4px 12px rgba(31, 111, 235, 0.3);
+        }
+
+        .btn-secondary { 
+            background: #fff; 
+            color: var(--text); 
+            border-color: var(--border); 
+        }
+
+        .btn-secondary:hover:not(:disabled) { 
+            background: #f5f5f7; 
+            border-color: var(--muted);
+        }
+
+        .btn-warning {
+            background: var(--warning);
+            color: #fff;
+            border-color: var(--warning);
+        }
+
+        .btn-warning:hover:not(:disabled) {
+            background: #e67e22;
+        }
+
+        .status-row { 
+            display: flex; 
+            justify-content: space-between; 
+            align-items: center;
+            margin: 10px 0; 
+            font-size: 14px; 
+            padding: 8px 0;
+            border-bottom: 1px solid #f5f5f7;
+        }
+
+        .status-row:last-child {
+            border-bottom: none;
+        }
+
+        .status-row .label {
+            color: v20px;
+            border-radius: 10px;
+            background: #ececf1;
+            overflow: hidden;
+            margin: 12px 0;
+            position: relative;
+        }
+
+        .progress span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, var(--primary), #4a9eff);
+            width: 0%;
+            transition: width 0.3s ease;
+            position: relative;
+        }
+
+        .progress span::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: linear-gradient(90deg, transparent, rgba(255,255,255,0.3), transparent);
+            animation: shimmer 2s infinite;
+        }
+
+        @keyframes shimmer {
+            0% { transform: translateX(-100%); }
+            100% { transform: translateX(100%); }
+        }
+
+        .progress-text {
+            font-size: 11px;
+            color: var(--muted);
+            text-align: right;
+            margin-top: 4px;
+        }
+
+        .message { 
+            font-size: 13px; 
+            color: var(--muted); 
+            padding: 12px;
+            background: #f9f9fb;
+            border-radius: 6px;
+            margin-top: 12px;
+        }
+
+        .log {
+            background: #0f1115;
+            color: #d4d4d8;
+            border-radius: 6px;
+            padding: 16px;
+            height: 320px;
+            overflow-y: auto;
+            font-family: "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
             font-size: 12px;
-            background: #ececf1;
-            color: var(--text);
+            line-height: 1.6;
+            border: 1px solid #1f2430;
         }
-        .badge.running { background: #dce9ff; color: #0b4ec2; }
-        .badge.completed { background: #e1f3e5; color: var(--success); }
-        .badge.error { background: #fdecea; color: var(--error); }
-        .badge.paused { background: #fff6e5; color: #9a5b00; }
 
-        .progress {
-            height: 14px;
-            border-radius: 999px;
-            background: #ececf1;
+        .log .log-entry {
+            margin-bottom: 4px;
+        }
+
+        .log .log-entry.error {
+            color: #ff6b6b;
+        }
+
+        .log .log-entry.success {
+            color: #51cf66;
+        }
+
+        .log .log-entry.warning {
+            color: #ffd43b;
+        }
+
+        .upload-progress { 
+            margin-top: 8px; 
+            font-size: 12px; 
+            color: var(--muted); 
+        }
+
+        .file-info {
+            margin-top: 8px;
+            padding: 8px 12px;
+            background: #f9f9fb;
+            border-radius: 4px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .file-info .filename {
+            font-weight: 600;
+            color: var(--text);
+            margin-bottom: 4px;
+        }
+
+        /* Resume specific styles */
+        .uuid-input-group {
+            position: relative;
+        }
+
+        .uuid-list {
+            max-height: 200px;
+            overflow-y: auto;
+            background: #f9f9fb;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            margin-top: 8px;
+        }
+
+        .uuid-item {
+            padding: 10px 12px;
+            cursor: pointer;
+            border-bottom: 1px solid var(--border);
+            transition: background 0.2s ease;
+        }
+
+        .uuid-item:hover {
+            background: #fff;
+        }
+
+        .uuid-item:last-child {
+            border-bottom: none;
+        }
+
+        .uuid-item .uuid {
+            font-family: monospace;
+            font-size: 13px;
+            color: var(--primary);
+        }
+
+        .uuid-item .date {
+            font-size: 11px;
+            color: var(--muted);
+            margin-top: 2px;
+        }
+
+        @media (max-width: 1024px) {
+            .layout {
+                grid-template-columns: 1fr;
+            }
+       
             overflow: hidden;
             margin: 10px 0 6px 0;
         }
@@ -135,87 +418,245 @@
 </head>
 <body>
     <header>
-        <h1>语音克隆批量处理</h1>
-        <p class="desc">与命令行一致的处理流程，上传音频/字幕后即可开始。</p>
+        <h1>🎙️ TTSVII - 语音克隆批量处理工具</h1>
+        <p class="desc">支持新任务创建和任务恢复，基于 SRT 字幕的智能语音克隆批处理系统</p>
     </header>
 
-    <div class="layout">
-        <section class="panel">
-            <h2>配置</h2>
-            <div class="grid-2">
-                <div>
+    <!-- Tab Navigation -->
+    <div class="tabs">
+        <button class="tab-btn active" onclick="switchTab('new')">🚀 新任务</button>
+        <button class="tab-btn" onclick="switchTab('resume')">🔄 恢复任务</button>
+    </div>
+
+    <!-- New Task Tab -->
+    <div id="tab-new" class="tab-content active">
+        <div class="layout">
+            <section class="panel">
+                <h2>任务配置</h2>
+                
+                <div class="form-group full">
                     <label for="api_url">API 基础 URL</label>
                     <input type="text" id="api_url" value="http://183.147.142.111:63364">
+                    <div class="hint">语音合成 API 的服务地址</div>
                 </div>
-                <div>
-                    <label for="output">输出目录</label>
-                    <input type="text" id="output" value="./output">
-                </div>
-                <div>
-                    <label for="audio">音频/视频文件</label>
-                    <input type="file" id="audio" accept="audio/*,video/*">
-                    <div class="upload-progress" id="audio_path_display">未选择文件</div>
-                    <div class="upload-progress" id="audio_duration_display"></div>
-                    <div class="upload-progress" id="audio_upload_status"></div>
-                    <div class="progress"><span id="audio_progress_bar"></span></div>
-                    <div class="upload-progress" id="audio_progress_text">0%</div>
-                </div>
-                <div>
-                    <label for="srt">SRT 字幕文件</label>
-                    <input type="file" id="srt" accept=".srt,text/plain">
-                    <div class="upload-progress" id="srt_path_display">未选择文件</div>
-                    <div class="upload-progress" id="srt_upload_status"></div>
-                    <div class="progress"><span id="srt_progress_bar"></span></div>
-                    <div class="upload-progress" id="srt_progress_text">0%</div>
-                </div>
-                <div>
-                    <label for="max_concurrent">最大并发（API）</label>
-                    <input type="number" id="max_concurrent" min="1" value="10">
-                </div>
-                <div>
-                    <label for="split_concurrent">切分并发</label>
-                    <input type="number" id="split_concurrent" min="1" value="4">
-                </div>
-                <div>
-                    <label for="batch_size">批次大小</label>
-                    <input type="number" id="batch_size" min="1" value="5">
-                </div>
-                <div>
-                    <label for="rest_duration">批次间休息（秒）</label>
-                    <input type="number" id="rest_duration" min="0" value="1">
-                </div>
-                <div>
-                    <label for="retry_count">失败重试次数</label>
-                    <input type="number" id="retry_count" min="0" value="3">
-                </div>
-            </div>
 
-            <div class="actions">
-                <button class="btn-primary" id="startBtn" onclick="startTask()">开始任务</button>
-                <button class="btn-secondary" id="stopBtn" onclick="stopTask()" disabled>停止</button>
-            </div>
-        </section>
+                <div class="grid-2">
+                    <div class="form-group full">
+                        <label for="audio">音频/视频文件<span class="required">*</span></label>
+                        <input type="file" id="audio" accept="audio/*,video/*">
+                        <div class="file-info" id="audio_info" style="display: none;">
+                            <div class="filename" id="audio_filename"></div>
+                            <div id="audio_duration"></div>
+                        </div>
+                        <div class="progress"><span id="audio_progress_bar"></span></div>
+                        <div class="progress-text" id="audio_progress_text"></div>
+                    </div>
 
-        <section class="panel">
-            <h2>状态</h2>
-            <div class="status-row">
-                <span>状态</span><span class="badge" id="stateBadge">空闲</span>
-            </div>
-            <div class="status-row"><span>任务 ID</span><span id="taskId">-</span></div>
-            <div class="status-row"><span>进度</span><span id="progressText">0 / 0</span></div>
-            <div class="progress"><span id="progressFill"></span></div>
-            <div class="status-row"><span>成功</span><span id="successCount">0</span></div>
-            <div class="status-row"><span>失败</span><span id="failureCount">0</span></div>
-            <div class="status-row"><span>跳过</span><span id="skippedCount">0</span></div>
-            <div class="status-row"><span>当前批次</span><span id="batchInfo">-</span></div>
-            <div class="status-row"><span>输出路径</span><span id="outputPath" style="font-size:12px; word-break:break-all;">-</span></div>
-            <div class="message" id="messageText">就绪</div>
-        </section>
+                    <div class="form-group full">
+                        <label for="srt">SRT 字幕文件<span class="required">*</span></label>
+                        <input type="file" id="srt" accept=".srt,text/plain">
+                        <div class="file-info" id="srt_info" style="display: none;">
+                            <div class="filename" id="srt_filename"></div>
+                        </div>
+                        <div class="progress"><span id="srt_progress_bar"></span></div>
+                        <div class="progress-text" id="srt_progress_text"></div>
+                    </div>
 
-        <section class="panel" style="grid-column: span 2;">
-            <h2>日志</h2>
-            <div class="log" id="logArea"></div>
-        </section>
+                    <div class="form-group">
+                        <label for="output">输出目录</label>
+                        <input type="text" id="output" value="./output">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="max_concurrent">最大并发（API）</label>
+                        <input type="number" id="max_concurrent" min="1" max="50" value="10">
+                        <div class="hint">同时调用 API 的最大数量</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="split_concurrent">切分并发</label>
+                        <input type="number" id="split_concurrent" min="1" max="16" value="4">
+                        <div class="hint">音频切分的并发数，建议不超过 CPU 核心数</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="batch_size">批次大小</label>
+                        <input type="number" id="batch_size" min="1" value="5">
+                        <div class="hint">处理多少轮并发后休息</div>
+                    </div>
+
+                    <div class="form-group">
+                        <label for="rest_duration">批次间休息（秒）</label>
+                        <input type="number" id="rest_duration" min="0" value="1">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="retry_count">失败重试次数</label>
+                        <input type="number" id="retry_count" min="0" max="10" value="3">
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button class="btn-primary" id="startBtn" onclick="startTask()">
+                        ▶️ 开始任务
+                    </button>
+                    <button class="btn-warning" id="stopBtn" onclick="stopTask()" disabled>
+                        ⏸️ 停止
+                    </button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>任务状态</h2>
+                <div class="status-row">
+                    <span class="label">状态</span>
+                    <span class="badge idle" id="stateBadge">空闲</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">任务 ID</span>
+                    <span class="value" id="taskId" style="font-family: monospace; font-size: 12px;">-</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">进度</span>
+                    <span class="value" id="progressText">0 / 0</span>
+                </div>
+                <div class="progress"><span id="progressFill"></span></div>
+                <div class="status-row">
+                    <span class="label">✅ 成功</span>
+                    <span class="value" id="successCount">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">❌ 失败</span>
+                    <span class="value" id="failureCount">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">⏭️ 跳过</span>
+                    <span class="value" id="skippedCount">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">批次信息</span>
+                    <span class="value" id="batchInfo">-</span>
+                </div>
+                <div class="message" id="messageText">就绪，等待开始...</div>
+                <div style="margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border);">
+                    <div style="font-size: 12px; color: var(--muted); margin-bottom: 4px;">输出路径</div>
+                    <div id="outputPath" style="font-size:11px; font-family: monospace; word-break:break-all; color: var(--text);">-</div>
+                </div>
+            </section>
+
+            <section class="panel" style="grid-column: span 2;">
+                <h2>实时日志</h2>
+                <div class="log" id="logArea"></div>
+            </section>
+        </div>
+    </div>
+
+    <!-- Resume Task Tab -->
+    <div id="tab-resume" class="tab-content">
+        <div class="layout">
+            <section class="panel">
+                <h2>恢复任务配置</h2>
+                
+                <div class="form-group">
+                    <label for="resume_uuid">任务 UUID<span class="required">*</span></label>
+                    <input type="text" id="resume_uuid" placeholder="例如: 359da018-7e23-4749-91de-ddd1c644b8dd">
+                    <div class="hint">从下方列表选择或手动输入</div>
+                </div>
+
+                <div class="uuid-list" id="uuidList">
+                    <!-- 动态加载 UUID 列表 -->
+                </div>
+
+                <div class="form-group">
+                    <label for="resume_srt">SRT 字幕文件<span class="required">*</span></label>
+                    <input type="file" id="resume_srt" accept=".srt,text/plain">
+                    <div class="hint">必须提供原始 SRT 文件以重建任务列表</div>
+                    <div class="file-info" id="resume_srt_info" style="display: none;">
+                        <div class="filename" id="resume_srt_filename"></div>
+                    </div>
+                    <div class="progress"><span id="resume_srt_progress_bar"></span></div>
+                    <div class="progress-text" id="resume_srt_progress_text"></div>
+                </div>
+
+                <div class="form-group">
+                    <label for="resume_audio">原始音频文件（可选）</label>
+                    <input type="file" id="resume_audio" accept="audio/*,video/*">
+                    <div class="hint">如需生成变速校准版本，请提供原始音频</div>
+                    <div class="file-info" id="resume_audio_info" style="display: none;">
+                        <div class="filename" id="resume_audio_filename"></div>
+                    </div>
+                    <div class="progress"><span id="resume_audio_progress_bar"></span></div>
+                    <div class="progress-text" id="resume_audio_progress_text"></div>
+                </div>
+
+                <div class="form-group">
+                    <label for="resume_output">输出目录</label>
+                    <input type="text" id="resume_output" value="./output">
+                </div>
+
+                <div class="grid-2">
+                    <div class="form-group">
+                        <label for="resume_max_concurrent">最大并发</label>
+                        <input type="number" id="resume_max_concurrent" min="1" value="10">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="resume_batch_size">批次大小</label>
+                        <input type="number" id="resume_batch_size" min="1" value="5">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="resume_rest_duration">批次间休息（秒）</label>
+                        <input type="number" id="resume_rest_duration" min="0" value="1">
+                    </div>
+
+                    <div class="form-group">
+                        <label for="resume_retry_count">重试次数</label>
+                        <input type="number" id="resume_retry_count" min="0" value="3">
+                    </div>
+                </div>
+
+                <div class="actions">
+                    <button class="btn-primary" id="resumeBtn" onclick="resumeTask()">
+                        🔄 恢复任务
+                    </button>
+                    <button class="btn-warning" id="resumeStopBtn" onclick="stopTask()" disabled>
+                        ⏸️ 停止
+                    </button>
+                </div>
+            </section>
+
+            <section class="panel">
+                <h2>任务状态</h2>
+                <div class="status-row">
+                    <span class="label">状态</span>
+                    <span class="badge idle" id="resumeStateBadge">空闲</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">任务 ID</span>
+                    <span class="value" id="resumeTaskId" style="font-family: monospace; font-size: 12px;">-</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">进度</span>
+                    <span class="value" id="resumeProgressText">0 / 0</span>
+                </div>
+                <div class="progress"><span id="resumeProgressFill"></span></div>
+                <div class="status-row">
+                    <span class="label">✅ 成功</span>
+                    <span class="value" id="resumeSuccessCount">0</span>
+                </div>
+                <div class="status-row">
+                    <span class="label">❌ 失败</span>
+                    <span class="value" id="resumeFailureCount">0</span>
+                </div>
+                <div class="message" id="resumeMessageText">选择 UUID 和 SRT 文件以开始恢复...</div>
+            </section>
+
+            <section class="panel" style="grid-column: span 2;">
+                <h2>实时日志</h2>
+                <div class="log" id="resumeLogArea"></div>
+            </section>
+        </div>
     </div>
 
     <script>
@@ -224,7 +665,53 @@
         const maxReconnectAttempts = 5;
         let selectedAudioFile = null;
         let selectedSrtFile = null;
+        let selectedResumeAudioFile = null;
+        let selectedResumeSrtFile = null;
         const CHUNK_SIZE = 1 * 1024 * 1024;
+        let currentTab = 'new';
+
+        // Tab Switching
+        function switchTab(tab) {
+            currentTab = tab;
+            document.querySelectorAll('.tab-btn').forEach(btn => btn.classList.remove('active'));
+            document.querySelectorAll('.tab-content').forEach(content => content.classList.remove('active'));
+            
+            document.querySelector(`.tab-btn[onclick="switchTab('${tab}')"]`).classList.add('active');
+            document.getElementById(`tab-${tab}`).classList.add('active');
+
+            if (tab === 'resume') {
+                loadAvailableUUIDs();
+            }
+        }
+
+        // Load available UUIDs from tmp/output directories
+        async function loadAvailableUUIDs() {
+            try {
+                const response = await fetch('/api/uuids');
+                const data = await response.json();
+                const uuidList = document.getElementById('uuidList');
+                
+                if (data.uuids && data.uuids.length > 0) {
+                    uuidList.innerHTML = data.uuids.map(item => `
+                        <div class="uuid-item" onclick="selectUUID('${item.uuid}')">
+                            <div class="uuid">${item.uuid}</div>
+                            <div class="date">修改时间: ${item.modified || '未知'}</div>
+                        </div>
+                    `).join('');
+                } else {
+                    uuidList.innerHTML = '<div style="padding: 20px; text-align: center; color: var(--muted);">暂无可恢复的任务</div>';
+                }
+            } catch (e) {
+                console.error('Failed to load UUIDs:', e);
+                document.getElementById('uuidList').innerHTML = '<div style="padding: 20px; text-align: center; color: var(--error);">加载失败</div>';
+            }
+        }
+
+        function selectUUID(uuid) {
+            document.getElementById('resume_uuid').value = uuid;
+            document.querySelectorAll('.uuid-item').forEach(item => item.style.background = '');
+            event.target.closest('.uuid-item').style.background = '#fff';
+        }
 
         function getWebSocketUrl() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -234,73 +721,111 @@
         function connectWebSocket() {
             if (ws && ws.readyState === WebSocket.OPEN) return;
             ws = new WebSocket(getWebSocketUrl());
-            ws.onopen = () => { reconnectAttempts = 0; addLog('WebSocket 已连接', 'info'); };
-            ws.onmessage = (event) => { try { updateStatus(JSON.parse(event.data)); } catch (e) { console.error(e); } };
+            ws.onopen = () => { 
+                reconnectAttempts = 0; 
+                addLog('WebSocket 已连接', 'success'); 
+            };
+            ws.onmessage = (event) => { 
+                try { 
+                    updateStatus(JSON.parse(event.data)); 
+                } catch (e) { 
+                    console.error(e); 
+                } 
+            };
             ws.onerror = () => addLog('WebSocket 连接错误', 'error');
             ws.onclose = () => {
                 if (reconnectAttempts < maxReconnectAttempts) {
                     reconnectAttempts++;
+                    addLog(`正在重连 WebSocket (${reconnectAttempts}/${maxReconnectAttempts})...`, 'warning');
                     setTimeout(connectWebSocket, 3000);
                 }
             };
         }
 
         function updateStatus(status) {
-            const stateBadge = document.getElementById('stateBadge');
+            const prefix = currentTab === 'resume' ? 'resume' : '';
+            const stateBadge = document.getElementById(prefix + 'StateBadge');
+            
             stateBadge.textContent = getStateText(status.state);
             stateBadge.className = 'badge ' + (status.state || 'idle');
 
-            document.getElementById('taskId').textContent = status.task_id || '-';
-            document.getElementById('progressText').textContent = `${status.progress} / ${status.total}`;
-            document.getElementById('successCount').textContent = status.success;
-            document.getElementById('failureCount').textContent = status.failure;
-            document.getElementById('skippedCount').textContent = status.skipped;
-            document.getElementById('batchInfo').textContent = status.total_batches > 0 ? `${status.current_batch} / ${status.total_batches}` : '-';
-            document.getElementById('outputPath').textContent = status.output_path || '-';
-            document.getElementById('messageText').textContent = status.message;
+            document.getElementById(prefix + 'TaskId').textContent = status.task_id || '-';
+            document.getElementById(prefix + 'ProgressText').textContent = `${status.progress} / ${status.total}`;
+            
+            if (currentTab === 'new') {
+                document.getElementById('successCount').textContent = status.success;
+                document.getElementById('failureCount').textContent = status.failure;
+                document.getElementById('skippedCount').textContent = status.skipped;
+                document.getElementById('batchInfo').textContent = status.total_batches > 0 ? 
+                    `${status.current_batch} / ${status.total_batches}` : '-';
+                document.getElementById('outputPath').textContent = status.output_path || '-';
+            } else {
+                document.getElementById('resumeSuccessCount').textContent = status.success;
+                document.getElementById('resumeFailureCount').textContent = status.failure;
+            }
+
+            document.getElementById(prefix + 'MessageText').textContent = status.message;
 
             const pct = status.total > 0 ? (status.progress / status.total) * 100 : 0;
-            document.getElementById('progressFill').style.width = `${pct}%`;
+            document.getElementById(prefix + 'ProgressFill').style.width = `${pct}%`;
 
-            const startBtn = document.getElementById('startBtn');
-            const stopBtn = document.getElementById('stopBtn');
-            if (status.state === 'running') { startBtn.disabled = true; stopBtn.disabled = false; }
-            else { startBtn.disabled = false; stopBtn.disabled = true; }
+            const startBtn = document.getElementById(currentTab === 'resume' ? 'resumeBtn' : 'startBtn');
+            const stopBtn = document.getElementById(currentTab === 'resume' ? 'resumeStopBtn' : 'stopBtn');
+            
+            if (status.state === 'running') { 
+                startBtn.disabled = true; 
+                stopBtn.disabled = false; 
+            } else { 
+                startBtn.disabled = false; 
+                stopBtn.disabled = true; 
+            }
 
-            addLog(status.message, status.state === 'error' ? 'error' : 'info');
+            const logType = status.state === 'error' ? 'error' : 
+                           status.state === 'completed' ? 'success' : 'info';
+            addLog(status.message, logType);
         }
 
         function getStateText(state) {
-            const map = { idle: '空闲', running: '运行中', paused: '已暂停', completed: '已完成', error: '错误' };
+            const map = { 
+                idle: '空闲', 
+                running: '运行中', 
+                paused: '已暂停', 
+                completed: '已完成', 
+                error: '错误' 
+            };
             return map[state] || state || '未知';
         }
 
         function addLog(message, type = 'info') {
-            const logArea = document.getElementById('logArea');
+            const logArea = document.getElementById(currentTab === 'resume' ? 'resumeLogArea' : 'logArea');
             const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
             entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
-            if (type === 'error') entry.style.color = '#ff6b6b';
             logArea.appendChild(entry);
             logArea.scrollTop = logArea.scrollHeight;
         }
 
         function setupFileInputs() {
+            // New task file inputs
             const audioInput = document.getElementById('audio');
             const srtInput = document.getElementById('srt');
+            
             audioInput.addEventListener('change', async (e) => {
                 const file = e.target.files[0];
                 if (file) {
                     selectedAudioFile = file;
-                    document.getElementById('audio_path_display').textContent = `已选择: ${file.name}`;
+                    document.getElementById('audio_filename').textContent = `📁 ${file.name}`;
+                    document.getElementById('audio_info').style.display = 'block';
                     document.getElementById('audio_progress_bar').style.width = '0%';
-                    document.getElementById('audio_progress_text').textContent = '0%';
+                    document.getElementById('audio_progress_text').textContent = '';
+                    
                     try {
                         const duration = await getAudioDuration(file);
                         if (duration) {
-                            document.getElementById('audio_duration_display').textContent = `时长约 ${(duration).toFixed(1)} 秒`;
+                            document.getElementById('audio_duration').textContent = `⏱️ 时长约 ${duration.toFixed(1)} 秒`;
                         }
                     } catch (_) {
-                        document.getElementById('audio_duration_display').textContent = '';
+                        document.getElementById('audio_duration').textContent = '';
                     }
                 }
             });
@@ -309,9 +834,36 @@
                 const file = e.target.files[0];
                 if (file) {
                     selectedSrtFile = file;
-                    document.getElementById('srt_path_display').textContent = `已选择: ${file.name}`;
+                    document.getElementById('srt_filename').textContent = `📁 ${file.name}`;
+                    document.getElementById('srt_info').style.display = 'block';
                     document.getElementById('srt_progress_bar').style.width = '0%';
-                    document.getElementById('srt_progress_text').textContent = '0%';
+                    document.getElementById('srt_progress_text').textContent = '';
+                }
+            });
+
+            // Resume task file inputs
+            const resumeAudioInput = document.getElementById('resume_audio');
+            const resumeSrtInput = document.getElementById('resume_srt');
+
+            resumeAudioInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    selectedResumeAudioFile = file;
+                    document.getElementById('resume_audio_filename').textContent = `📁 ${file.name}`;
+                    document.getElementById('resume_audio_info').style.display = 'block';
+                    document.getElementById('resume_audio_progress_bar').style.width = '0%';
+                    document.getElementById('resume_audio_progress_text').textContent = '';
+                }
+            });
+
+            resumeSrtInput.addEventListener('change', (e) => {
+                const file = e.target.files[0];
+                if (file) {
+                    selectedResumeSrtFile = file;
+                    document.getElementById('resume_srt_filename').textContent = `📁 ${file.name}`;
+                    document.getElementById('resume_srt_info').style.display = 'block';
+                    document.getElementById('resume_srt_progress_bar').style.width = '0%';
+                    document.getElementById('resume_srt_progress_text').textContent = '';
                 }
             });
         }
@@ -320,18 +872,25 @@
             return new Promise((resolve, reject) => {
                 const audio = new Audio();
                 const url = URL.createObjectURL(file);
-                audio.onloadedmetadata = () => { resolve(audio.duration); URL.revokeObjectURL(url); };
-                audio.onerror = (e) => { reject(e); URL.revokeObjectURL(url); };
+                audio.onloadedmetadata = () => { 
+                    resolve(audio.duration); 
+                    URL.revokeObjectURL(url); 
+                };
+                audio.onerror = (e) => { 
+                    reject(e); 
+                    URL.revokeObjectURL(url); 
+                };
                 audio.src = url;
             });
         }
 
-        async function uploadFileChunked(file, fileType) {
+        async function uploadFileChunked(file, fileType, prefix = '') {
             const uploadId = crypto.randomUUID();
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-            const bar = document.getElementById(`${fileType}_progress_bar`);
-            const text = document.getElementById(`${fileType}_progress_text`);
-            const status = document.getElementById(`${fileType}_upload_status`);
+            const bar = document.getElementById(`${prefix}${fileType}_progress_bar`);
+            const text = document.getElementById(`${prefix}${fileType}_progress_text`);
+
+            addLog(`开始上传 ${file.name} (${(file.size / 1024 / 1024).toFixed(2)} MB)`, 'info');
 
             for (let chunkIndex = 0; chunkIndex < totalChunks; chunkIndex++) {
                 const start = chunkIndex * CHUNK_SIZE;
@@ -350,21 +909,28 @@
 
                 const pct = ((chunkIndex + 1) / totalChunks) * 100;
                 bar.style.width = `${pct}%`;
-                text.textContent = `${pct.toFixed(1)}%`;
-                status.textContent = `正在上传 (${chunkIndex + 1}/${totalChunks})`;
+                text.textContent = `上传中: ${pct.toFixed(0)}%`;
             }
 
             const merge = await fetch('/api/upload/merge', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ upload_id: uploadId, file_type: fileType, filename: file.name, total_chunks: totalChunks })
+                body: JSON.stringify({ 
+                    upload_id: uploadId, 
+                    file_type: fileType, 
+                    filename: file.name, 
+                    total_chunks: totalChunks 
+                })
             });
+            
             if (!merge.ok) throw new Error('合并文件失败');
             const result = await merge.json();
             if (!result.success) throw new Error(result.error || '合并文件失败');
-            status.textContent = '上传完成';
+            
             bar.style.width = '100%';
-            text.textContent = '100%';
+            text.textContent = '✓ 上传完成';
+            addLog(`${file.name} 上传完成`, 'success');
+            
             return result.file_path;
         }
 
@@ -375,7 +941,8 @@
             }
 
             try {
-                addLog('开始上传文件...', 'info');
+                addLog('========== 开始新任务 ==========', 'info');
+                
                 const [audioPath, srtPath] = await Promise.all([
                     uploadFileChunked(selectedAudioFile, 'audio'),
                     uploadFileChunked(selectedSrtFile, 'srt')
@@ -393,6 +960,7 @@
                     retry_count: parseInt(document.getElementById('retry_count').value)
                 };
 
+                addLog('正在启动任务...', 'info');
                 const response = await fetch('/api/start', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -401,13 +969,70 @@
 
                 const result = await response.json();
                 if (!result.success) {
-                    addLog(`启动失败: ${result.error}`, 'error');
+                    addLog(`❌ 启动失败: ${result.error}`, 'error');
                     alert(result.error);
                 } else {
-                    addLog('任务已启动', 'info');
+                    addLog('✅ 任务已启动', 'success');
                 }
             } catch (e) {
-                addLog(`启动任务失败: ${e.message}`, 'error');
+                addLog(`❌ 启动任务失败: ${e.message}`, 'error');
+                alert(e.message);
+            }
+        }
+
+        async function resumeTask() {
+            const uuid = document.getElementById('resume_uuid').value.trim();
+            if (!uuid) {
+                alert('请输入或选择任务 UUID');
+                return;
+            }
+
+            if (!selectedResumeSrtFile) {
+                alert('请选择 SRT 字幕文件（必需）');
+                return;
+            }
+
+            try {
+                addLog('========== 恢复任务 ==========', 'info');
+                addLog(`UUID: ${uuid}`, 'info');
+                
+                const srtPath = await uploadFileChunked(selectedResumeSrtFile, 'srt', 'resume_');
+                
+                let audioPath = null;
+                if (selectedResumeAudioFile) {
+                    audioPath = await uploadFileChunked(selectedResumeAudioFile, 'audio', 'resume_');
+                    addLog('已提供原始音频，将生成变速版本', 'info');
+                } else {
+                    addLog('未提供原始音频，将跳过变速合并', 'warning');
+                }
+
+                const config = {
+                    uuid: uuid,
+                    srt: srtPath,
+                    audio: audioPath,
+                    output: document.getElementById('resume_output').value,
+                    max_concurrent: parseInt(document.getElementById('resume_max_concurrent').value),
+                    batch_size: parseInt(document.getElementById('resume_batch_size').value),
+                    rest_duration: parseInt(document.getElementById('resume_rest_duration').value),
+                    retry_count: parseInt(document.getElementById('resume_retry_count').value)
+                };
+
+                addLog('正在恢复任务...', 'info');
+                const response = await fetch('/api/resume', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(config)
+                });
+
+                const result = await response.json();
+                if (!result.success) {
+                    addLog(`❌ 恢复失败: ${result.error}`, 'error');
+                    alert(result.error);
+                } else {
+                    addLog('✅ 任务恢复已启动', 'success');
+                }
+            } catch (e) {
+                addLog(`❌ 恢复任务失败: ${e.message}`, 'error');
                 alert(e.message);
             }
         }
@@ -415,21 +1040,24 @@
         async function stopTask() {
             try {
                 await fetch('/api/stop', { method: 'POST' });
-                addLog('已请求停止任务', 'info');
+                addLog('⏸️ 已请求停止任务', 'warning');
             } catch (e) {
-                addLog('停止任务失败', 'error');
+                addLog('❌ 停止任务失败', 'error');
             }
         }
 
         window.addEventListener('load', () => {
             connectWebSocket();
             setupFileInputs();
+            addLog('🎙️ TTSVII 已就绪', 'success');
+            
+            // Poll status every 3 seconds
             setInterval(async () => {
                 try {
                     const res = await fetch('/api/status');
                     updateStatus(await res.json());
                 } catch (_) {}
-            }, 5000);
+            }, 3000);
         });
     </script>
 </body>
