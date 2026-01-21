@@ -3,6 +3,7 @@ use crate::audio::AudioSplitter;
 use crate::srt::SrtEntry;
 use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -14,6 +15,26 @@ pub struct Task {
     pub speaker_audio: PathBuf,
     pub emotion_audio: PathBuf,
     pub output_path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TaskManifest {
+    pub entries: Vec<SrtEntry>,
+    pub audio_path: PathBuf,
+}
+
+impl TaskManifest {
+    pub fn save(&self, path: &Path) -> Result<()> {
+        let file = std::fs::File::create(path)?;
+        serde_json::to_writer_pretty(file, self)?;
+        Ok(())
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+        let file = std::fs::File::open(path)?;
+        let manifest = serde_json::from_reader(file)?;
+        Ok(manifest)
+    }
 }
 
 pub struct TaskExecutor {

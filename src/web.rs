@@ -48,6 +48,18 @@ pub struct TaskConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ResumeConfig {
+    pub uuid: String,
+    pub api_url: String,
+    pub output: String,
+    pub max_concurrent: usize,
+    pub batch_size: usize,
+    pub rest_duration: u64,
+    #[serde(default = "default_retry_count")]
+    pub retry_count: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskStatus {
     pub state: String, // "idle", "running", "paused", "completed", "error"
     pub progress: u64,
@@ -198,6 +210,15 @@ impl AppState {
                         output_path: None,
                     })
                     .await;
+
+                // 保存任务清单到临时目录，以便后续恢复
+                let manifest = task::TaskManifest {
+                    entries: srt_entries.clone(),
+                    audio_path: PathBuf::from(&config.audio),
+                };
+                if let Err(e) = manifest.save(&tmp_dir.join("tasks.json")) {
+                    eprintln!("警告: 保存任务清单失败: {}", e);
+                }
 
                 // 创建任务管理器
                 let task_manager = TaskManager::new(
@@ -803,6 +824,318 @@ impl AppState {
         Ok(())
     }
 
+    pub async fn resume_task(&self, config: ResumeConfig) -> Result<()> {
+        if let Some(handle) = self.task_handle.read().await.as_ref() {
+            if !handle.is_finished() {
+                anyhow::bail!("已有任务正在运行");
+            }
+        }
+
+        self.should_stop.store(false, Ordering::Relaxed);
+        let state = self.clone();
+
+        let handle = tokio::spawn(async move {
+            let uuid_str = config.uuid.clone();
+            state
+                .update_status(TaskStatus {
+                    state: "running".to_string(),
+                    progress: 0,
+                    total: 0,
+                    success: 0,
+                    failure: 0,
+                    skipped: 0,
+                    current_batch: 0,
+                    total_batches: 0,
+                    message: format!("正在恢复任务: {}", uuid_str),
+                    task_id: Some(uuid_str.clone()),
+                    output_path: None,
+                })
+                .await;
+
+            let result = async {
+                let tmp_dir = std::env::current_dir()?.join("tmp").join(&uuid_str);
+                let output_path = PathBuf::from(&config.output);
+                let output_task_dir = output_path.join(&uuid_str);
+
+                if !tmp_dir.exists() {
+                    anyhow::bail!("临时目录不存在");
+                }
+                if !output_task_dir.exists() {
+                    tokio::fs::create_dir_all(&output_task_dir).await?;
+                }
+
+                let manifest_path = tmp_dir.join("tasks.json");
+                if !manifest_path.exists() {
+                    anyhow::bail!("任务清单不存在");
+                }
+
+                let manifest = task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
+                let srt_entries = manifest.entries;
+                let audio_path = manifest.audio_path;
+
+                state
+                    .update_status(TaskStatus {
+                        state: "running".to_string(),
+                        progress: 0,
+                        total: srt_entries.len() as u64,
+                        success: 0,
+                        failure: 0,
+                        skipped: 0,
+                        current_batch: 0,
+                        total_batches: 0,
+                        message: format!("加载成功: {} 个条目", srt_entries.len()),
+                        task_id: Some(uuid_str.clone()),
+                        output_path: None,
+                    })
+                    .await;
+
+                let task_manager = TaskManager::new(
+                    srt_entries.clone(),
+                    &audio_path,
+                    &tmp_dir,
+                    &output_task_dir,
+                )?;
+
+                let api_client = Arc::new(api::ApiClient::new(config.api_url.clone()));
+                let executor = Arc::new(TaskExecutor::new(
+                    api_client,
+                    config.max_concurrent,
+                    config.retry_count,
+                ));
+
+                let tasks = task_manager.get_tasks();
+                let tasks_len = tasks.len();
+
+                let mut initial_pending_indices = Vec::new();
+                for (idx, task) in tasks.iter().enumerate() {
+                    let exists = match tokio::fs::metadata(&task.output_path).await {
+                        Ok(m) => m.len() > 0,
+                        Err(_) => false,
+                    };
+                    if !exists {
+                        initial_pending_indices.push(idx);
+                    }
+                }
+
+                let batch_task_count = config.batch_size * config.max_concurrent;
+
+                state
+                    .update_status(TaskStatus {
+                        state: "running".to_string(),
+                        progress: (tasks_len - initial_pending_indices.len()) as u64,
+                        total: tasks_len as u64,
+                        success: (tasks_len - initial_pending_indices.len()) as u64,
+                        failure: 0,
+                        skipped: 0,
+                        current_batch: 0,
+                        total_batches: 0,
+                        message: format!(
+                            "已加载 {} 个任务，{} 个待恢复",
+                            tasks_len,
+                            initial_pending_indices.len()
+                        ),
+                        task_id: Some(uuid_str.clone()),
+                        output_path: None,
+                    })
+                    .await;
+
+                if !initial_pending_indices.is_empty() {
+                    executor.set_total(initial_pending_indices.len() as u64);
+                    let mut failed_task_indices: HashSet<usize> = HashSet::new();
+                    let mut retry_round = 0;
+
+                    loop {
+                        retry_round += 1;
+                        if retry_round > 1 {
+                            state
+                                .update_status(TaskStatus {
+                                    state: "running".to_string(),
+                                    progress: executor.get_stats().0 + executor.get_stats().1,
+                                    total: initial_pending_indices.len() as u64,
+                                    success: executor.get_stats().0,
+                                    failure: executor.get_stats().1,
+                                    skipped: 0,
+                                    current_batch: 0,
+                                    total_batches: 0,
+                                    message: "等待 60 秒后重试...".to_string(),
+                                    task_id: Some(uuid_str.clone()),
+                                    output_path: None,
+                                })
+                                .await;
+                            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                        }
+
+                        let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
+                            initial_pending_indices
+                                .iter()
+                                .map(|&idx| (idx, &tasks[idx]))
+                                .collect()
+                        } else {
+                            failed_task_indices
+                                .iter()
+                                .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                                .collect()
+                        };
+
+                        if tasks_to_process.is_empty() && retry_round > 1 {
+                            break;
+                        }
+
+                        executor.set_total(tasks_to_process.len() as u64);
+                        let mut batch_num = 0;
+                        for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
+                            if state.should_stop.load(Ordering::Relaxed) {
+                                anyhow::bail!("任务已停止");
+                            }
+                            batch_num += 1;
+                            let batch_end =
+                                (batch_start + batch_task_count).min(tasks_to_process.len());
+                            let batch_tasks = &tasks_to_process[batch_start..batch_end];
+
+                            state
+                                .update_status(TaskStatus {
+                                    state: "running".to_string(),
+                                    progress: executor.get_stats().0 + executor.get_stats().1,
+                                    total: initial_pending_indices.len() as u64,
+                                    success: executor.get_stats().0,
+                                    failure: executor.get_stats().1,
+                                    skipped: 0,
+                                    current_batch: batch_num,
+                                    total_batches: 0,
+                                    message: format!("批次 {} 处理中", batch_num),
+                                    task_id: Some(uuid_str.clone()),
+                                    output_path: None,
+                                })
+                                .await;
+
+                            let futures: Vec<_> = batch_tasks
+                                .iter()
+                                .map(|(_, task)| {
+                                    let task = (*task).clone();
+                                    let executor = executor.clone();
+                                    async move { executor.execute_task(task).await }
+                                })
+                                .collect();
+                            let _ = futures::future::join_all(futures).await;
+
+                            if batch_end < tasks_to_process.len() {
+                                tokio::time::sleep(std::time::Duration::from_secs(
+                                    config.rest_duration,
+                                ))
+                                .await;
+                            }
+                        }
+
+                        let mut new_failed_indices = HashSet::new();
+                        for (original_idx, _) in tasks_to_process.iter() {
+                            if !tasks[*original_idx].output_path.exists() {
+                                new_failed_indices.insert(*original_idx);
+                            }
+                        }
+                        failed_task_indices = new_failed_indices;
+                        if failed_task_indices.is_empty() {
+                            break;
+                        }
+                    }
+                    executor.finish();
+                }
+
+                state
+                    .update_status(TaskStatus {
+                        state: "running".to_string(),
+                        progress: tasks_len as u64,
+                        total: tasks_len as u64,
+                        success: tasks_len as u64,
+                        failure: 0,
+                        skipped: 0,
+                        current_batch: 0,
+                        total_batches: 0,
+                        message: "正在合并音频...".to_string(),
+                        task_id: Some(uuid_str.clone()),
+                        output_path: None,
+                    })
+                    .await;
+
+                let mut audio_files = Vec::new();
+                let mut srt_entries_for_merge = Vec::new();
+                let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+                sorted_tasks.sort_by_key(|task| task.entry.index);
+
+                for task in sorted_tasks {
+                    if task.output_path.exists()
+                        && tokio::fs::metadata(&task.output_path).await?.len() > 44
+                    {
+                        audio_files.push(task.output_path.clone());
+                        srt_entries_for_merge.push(task.entry.clone());
+                    }
+                }
+
+                if audio_files.is_empty() {
+                    anyhow::bail!("没有有效音频");
+                }
+
+                let final_output = output_path.join(format!("{}.wav", uuid_str));
+                audio::AudioSplitter::merge_audio(&audio_files, &final_output).await?;
+
+                if audio_path.exists() {
+                    let timed_output = output_path.join(format!("{}_timed.wav", uuid_str));
+                    audio::AudioSplitter::merge_audio_with_timing(
+                        &audio_files,
+                        &srt_entries_for_merge,
+                        &timed_output,
+                        &audio_path,
+                        None::<fn(usize, usize, String)>,
+                    )
+                    .await?;
+                }
+
+                Ok::<(), anyhow::Error>(())
+            }
+            .await;
+
+            match result {
+                Ok(_) => {
+                    state
+                        .update_status(TaskStatus {
+                            state: "completed".to_string(),
+                            progress: 100,
+                            total: 100,
+                            success: 100,
+                            failure: 0,
+                            skipped: 0,
+                            current_batch: 0,
+                            total_batches: 0,
+                            message: "恢复任务完成".to_string(),
+                            task_id: Some(uuid_str.clone()),
+                            output_path: Some(format!("{}/{}.wav", config.output, uuid_str)),
+                        })
+                        .await;
+                }
+                Err(e) => {
+                    state
+                        .update_status(TaskStatus {
+                            state: "error".to_string(),
+                            progress: 0,
+                            total: 0,
+                            success: 0,
+                            failure: 0,
+                            skipped: 0,
+                            current_batch: 0,
+                            total_batches: 0,
+                            message: format!("错误: {}", e),
+                            task_id: Some(uuid_str.clone()),
+                            output_path: None,
+                        })
+                        .await;
+                }
+            }
+            Ok(())
+        });
+
+        *self.task_handle.write().await = Some(handle);
+        Ok(())
+    }
+
     pub async fn stop_task(&self) {
         self.should_stop.store(true, Ordering::Relaxed);
     }
@@ -861,6 +1194,7 @@ pub async fn create_router() -> Router {
         .route("/", get(index_handler))
         .route("/api/status", get(get_status))
         .route("/api/start", post(start_task))
+        .route("/api/resume", post(resume_handler))
         .route("/api/stop", post(stop_task))
         .route("/api/upload/chunk", post(upload_chunk))
         .route("/api/upload/check", get(check_upload))
@@ -1218,6 +1552,19 @@ async fn merge_upload(Json(params): Json<serde_json::Value>) -> Json<serde_json:
         "success": true,
         "file_path": final_path.to_string_lossy().to_string()
     }))
+}
+
+async fn resume_handler(
+    State(state): State<AppState>,
+    Json(config): Json<ResumeConfig>,
+) -> Json<serde_json::Value> {
+    match state.resume_task(config).await {
+        Ok(_) => Json(serde_json::json!({ "success": true })),
+        Err(e) => Json(serde_json::json!({
+            "success": false,
+            "error": e.to_string()
+        })),
+    }
 }
 
 async fn stop_task(State(state): State<AppState>) -> Json<serde_json::Value> {

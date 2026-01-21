@@ -54,11 +54,28 @@ struct Args {
     /// 失败重试次数
     #[arg(long, default_value_t = 3)]
     retry_count: u32,
+
+    /// 恢复任务 UUID
+    #[arg(long)]
+    resume: Option<String>,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let args = Args::parse();
+
+    // 如果指定了 resume，则执行恢复任务
+    if let Some(uuid) = args.resume {
+        return resume_cli_task(
+            uuid,
+            args.api_url,
+            args.output,
+            args.max_concurrent,
+            args.batch_size,
+            args.rest_duration,
+            args.retry_count,
+        ).await;
+    }
 
     // 如果没有提供 audio 和 srt 参数，或者明确指定了 --webui，则启动 Web UI
     let should_start_webui = args.webui || (args.audio.is_none() && args.srt.is_none());
@@ -180,6 +197,13 @@ async fn run_cli_mode(
                 );
             }
         }
+
+        // 保存任务清单到临时目录，以便后续恢复
+        let manifest = task::TaskManifest {
+            entries: srt_entries.clone(),
+            audio_path: audio.clone(),
+        };
+        manifest.save(&tmp_dir.join("tasks.json"))?;
 
         // 创建任务管理器
         let task_manager = TaskManager::new(srt_entries, &audio, &tmp_dir, &output_task_dir)?;
@@ -516,4 +540,230 @@ async fn run_cli_mode(
     }
     .await;
     result
+}
+
+async fn resume_cli_task(
+    uuid: String,
+    api_url: String,
+    output: PathBuf,
+    max_concurrent: usize,
+    batch_size: usize,
+    rest_duration: u64,
+    retry_count: u32,
+) -> Result<()> {
+    println!("正在尝试恢复任务: {}", uuid);
+    let uuid_str = uuid.clone();
+
+    // 1. 定位目录
+    let tmp_dir = std::env::current_dir()?.join("tmp").join(&uuid);
+    let output_task_dir = output.join(&uuid);
+
+    if !tmp_dir.exists() {
+        anyhow::bail!("临时目录不存在: {:?}", tmp_dir);
+    }
+
+    if !output_task_dir.exists() {
+        println!("输出目录不存在，将重新创建: {:?}", output_task_dir);
+        tokio::fs::create_dir_all(&output_task_dir).await?;
+    }
+
+    // 2. 加载清单
+    let manifest_path = tmp_dir.join("tasks.json");
+    if !manifest_path.exists() {
+        anyhow::bail!("未找到任务清单文件 (tasks.json)，无法恢复任务。只有新版本的程序创建的任务才支持恢复。");
+    }
+    let manifest = task::TaskManifest::load(&manifest_path).context("加载任务清单失败")?;
+
+    let srt_entries = manifest.entries;
+    let audio_path = manifest.audio_path;
+
+    println!("成功加载任务清单: {} 个条目", srt_entries.len());
+
+    // 3. 构建 TaskManager
+    let task_manager = TaskManager::new(srt_entries.clone(), &audio_path, &tmp_dir, &output_task_dir)?;
+
+    // 4. 执行剩余任务
+    let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
+    let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
+
+    let tasks = task_manager.get_tasks();
+
+    // 找出未完成的任务
+    let mut initial_pending_indices = Vec::new();
+    for (idx, task) in tasks.iter().enumerate() {
+        let exists = match tokio::fs::metadata(&task.output_path).await {
+            Ok(m) => m.len() > 0,
+            Err(_) => false,
+        };
+        if !exists {
+            initial_pending_indices.push(idx);
+        }
+    }
+
+    println!("总任务数: {} | 已完成: {} | 待处理: {}", tasks.len(), tasks.len() - initial_pending_indices.len(), initial_pending_indices.len());
+
+    if initial_pending_indices.is_empty() {
+        println!("所有任务均已完成，直接进行合并步骤。");
+    } else {
+        executor.set_total(initial_pending_indices.len() as u64);
+
+        let batch_task_count = batch_size * max_concurrent;
+        let mut failed_task_indices: HashSet<usize> = HashSet::new();
+        let mut retry_round = 0;
+
+        loop {
+            retry_round += 1;
+
+            if retry_round > 1 {
+                if failed_task_indices.is_empty() {
+                    break;
+                }
+                println!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
+                println!("等待 60 秒后开始重试...");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+
+            let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
+                initial_pending_indices.iter().map(|&idx| (idx, &tasks[idx])).collect()
+            } else {
+                failed_task_indices
+                    .iter()
+                    .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                    .collect()
+            };
+
+            if tasks_to_process.is_empty() && retry_round > 1 {
+                break;
+            }
+
+            println!(
+                "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
+                tasks_to_process.len(),
+                retry_round
+            );
+
+            executor.set_total(tasks_to_process.len() as u64);
+
+            let mut batch_num = 0;
+            for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
+                batch_num += 1;
+                let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
+                let batch_tasks = &tasks_to_process[batch_start..batch_end];
+
+                println!(
+                    "\n批次 {}/{}: 处理任务 {}-{}",
+                    batch_num,
+                    (tasks_to_process.len() + batch_task_count - 1) / batch_task_count,
+                    batch_start + 1,
+                    batch_end
+                );
+
+                let futures: Vec<_> = batch_tasks
+                    .iter()
+                    .map(|(_, task)| {
+                        let task = (*task).clone();
+                        let executor = executor.clone();
+                        async move {
+                            executor.execute_task(task).await
+                        }
+                    })
+                    .collect();
+
+                let _ = futures::future::join_all(futures).await;
+
+                let (success, failure) = executor.get_stats();
+                println!(
+                    "实时统计: 进度/{} | 成功: {} | 失败: {}",
+                     tasks_to_process.len(), success, failure
+                );
+
+                if batch_end < tasks_to_process.len() {
+                    println!("休息 {} 秒...", rest_duration);
+                    tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
+                }
+            }
+
+            let mut new_failed_indices = HashSet::new();
+            for (original_idx, _) in tasks_to_process.iter() {
+                if !tasks[*original_idx].output_path.exists() {
+                     new_failed_indices.insert(*original_idx);
+                }
+            }
+            failed_task_indices = new_failed_indices;
+
+             if failed_task_indices.is_empty() && retry_round == 1 {
+                 println!("\n本轮所有任务都已完成！");
+                 break;
+             }
+             if failed_task_indices.is_empty() {
+                 break;
+             }
+        }
+
+        executor.finish();
+    }
+
+    println!("\n所有任务执行完成，开始音频可用性校验（简略版）...");
+    // 简略版校验，主要为了确保合并时文件有效
+    let mut audio_files = Vec::new();
+    let mut srt_entries_for_merge = Vec::new();
+    let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+    sorted_tasks.sort_by_key(|task| task.entry.index);
+
+    for task in sorted_tasks {
+        if task.output_path.exists() {
+             // 简单检查文件大小
+            let metadata = tokio::fs::metadata(&task.output_path).await?;
+            if metadata.len() > 44 {
+                audio_files.push(task.output_path.clone());
+                srt_entries_for_merge.push(task.entry.clone());
+            } else {
+                 eprintln!("警告: 任务 {} 输出文件无效 (过小)，跳过合并", task.entry.index);
+            }
+        } else {
+            eprintln!("警告: 任务 {} 输出文件缺失，跳过合并", task.entry.index);
+        }
+    }
+
+    if audio_files.is_empty() {
+        anyhow::bail!("没有有效的合成音频文件可以合并");
+    }
+
+    println!("找到 {} 个有效的音频文件用于合并", audio_files.len());
+
+    // 合并音频
+    let final_output = output.join(format!("{}.wav", uuid_str));
+    println!("开始合并 {} 个音频文件到: {}", audio_files.len(), final_output.display());
+
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1800),
+        audio::AudioSplitter::merge_audio(&audio_files, &final_output),
+    )
+    .await
+    .context("合并音频超时")??;
+
+    println!("完成！原始合并音频已保存到: {}", final_output.display());
+
+    // 变速合并
+    if audio_path.exists() {
+         let timed_output = output.join(format!("{}_timed.wav", uuid_str));
+         println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
+         tokio::time::timeout(
+            std::time::Duration::from_secs(1800),
+            audio::AudioSplitter::merge_audio_with_timing(
+                &audio_files,
+                &srt_entries_for_merge,
+                &timed_output,
+                &audio_path,
+                None::<fn(usize, usize, String)>,
+            ),
+        )
+        .await
+        .context("合并变速音频超时")??;
+         println!("完成！变速合并音频已保存到: {}", timed_output.display());
+    } else {
+         println!("找不到原始音频文件，跳过变速合并步骤。");
+    }
+
+    Ok(())
 }

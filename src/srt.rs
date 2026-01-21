@@ -1,14 +1,37 @@
 use anyhow::Result;
 use chrono::Duration;
+use serde::{Deserialize, Serialize};
 use srtlib::{Subtitles, Timestamp};
 use std::path::Path;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SrtEntry {
     pub index: u32,
+    #[serde(with = "duration_serde")]
     pub start_time: Duration,
+    #[serde(with = "duration_serde")]
     pub end_time: Duration,
     pub text: String,
+}
+
+mod duration_serde {
+    use chrono::Duration;
+    use serde::{self, Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_i64(duration.num_milliseconds())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let millis = i64::deserialize(deserializer)?;
+        Ok(Duration::milliseconds(millis))
+    }
 }
 
 pub struct SrtParser;
