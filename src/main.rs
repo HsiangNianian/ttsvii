@@ -404,8 +404,7 @@ async fn run_cli_mode(
         loop {
             validation_round += 1;
             if validation_round > 1 {
-                println!("\n=== 第 {} 轮重试验证失败的任务 ===", validation_round - 1);
-                println!("等待 60 秒后开始重试...");
+                println!("第 {} 轮重试...", validation_round - 1);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
@@ -422,12 +421,12 @@ async fn run_cli_mode(
             };
 
             if tasks_to_validate.is_empty() {
-                println!("\n所有音频校验通过！");
+                println!("所有音频校验通过！");
                 break;
             }
 
             println!(
-                "\n开始校验 {} 个音频文件（本轮: 第 {} 轮）...",
+                "校验 {} 个音频文件（第 {} 轮）...",
                 tasks_to_validate.len(),
                 validation_round
             );
@@ -440,7 +439,7 @@ async fn run_cli_mode(
                     }
                     Err(e) => {
                         eprintln!(
-                            "音频文件校验失败 (任务 {}): {}",
+                            "✗ 任务 {} 校验失败: {}",
                             task.entry.index, e
                         );
                         new_invalid_indices.insert(*original_idx);
@@ -453,7 +452,7 @@ async fn run_cli_mode(
             // 如果有无效的音频，需要重新执行这些任务
             if !new_invalid_indices.is_empty() {
                 println!(
-                    "\n发现 {} 个无效音频文件，需要重新生成",
+                    "发现 {} 个无效文件，重新生成...",
                     new_invalid_indices.len()
                 );
                 // 将这些任务加入失败任务列表，重新执行
@@ -464,7 +463,6 @@ async fn run_cli_mode(
                     .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
                     .collect();
 
-                println!("\n开始重新生成 {} 个无效音频文件...", tasks_to_retry.len());
                 executor.set_total(tasks_to_retry.len() as u64);
 
                 // 按批次重新执行
@@ -481,9 +479,19 @@ async fn run_cli_mode(
                                 executor.execute_task(task).await
                             }
                         })
-                        .collect();
+                    .collect();
 
-                    let batch_results = futures::future::join_all(futures).await;
+                    let _ = futures::future::join_all(futures).await;
+                    
+                    let (success, failure) = executor.get_stats();
+                    println!(
+                        "✓ 重生成进度 {}/{} | 成功: {} | 失败: {}",
+                        success + failure,
+                        tasks_to_retry.len(),
+                        success,
+                        failure
+                    );
+
                     // 检查结果
                     for (original_idx, task) in batch_tasks.iter() {
                         if !task.output_path.exists() {
@@ -513,12 +521,12 @@ async fn run_cli_mode(
             }
 
             if invalid_audio_indices.is_empty() && failed_task_indices.is_empty() {
-                println!("\n所有音频校验通过！");
+                println!("所有音频校验通过！");
                 break;
             }
         }
 
-        println!("\n开始收集音频文件...");
+        println!("收集音频文件用于合并...");
 
         // 收集所有合成的音频文件及其对应的 SRT 条目（只包含实际存在的文件）
         let mut audio_files = Vec::new();
@@ -540,12 +548,10 @@ async fn run_cli_mode(
             anyhow::bail!("没有有效的合成音频文件可以合并");
         }
 
-        println!("找到 {} 个有效的音频文件用于合并", audio_files.len());
+        println!("找到 {} 个有效的音频文件，开始合并...", audio_files.len());
 
         // 合并音频（保存到 output/{uuid}.wav）
         let final_output = output.join(format!("{}.wav", uuid_str));
-        println!("开始合并 {} 个音频文件到: {}", audio_files.len(), final_output.display());
-        println!("（这可能需要一些时间，请耐心等待...）");
         // 给合并操作添加超时保护（最多 30 分钟）
         tokio::time::timeout(
             std::time::Duration::from_secs(1800), // 30 分钟
@@ -554,13 +560,11 @@ async fn run_cli_mode(
         .await
         .context("合并音频超时（超过 30 分钟）")??;
 
-        println!("完成！原始合并音频已保存到: {}", final_output.display());
+        println!("✓ 原始合并完成: {}", final_output.display());
 
         // 生成根据 SRT 时间戳变速后的合并音频
         let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-        println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
-        println!("目标文件: {}", timed_output.display());
-        println!("（这可能需要一些时间，请耐心等待...）");
+        println!("生成变速合并音频...");
         tokio::time::timeout(
             std::time::Duration::from_secs(1800), // 30 分钟
             audio::AudioSplitter::merge_audio_with_timing(
@@ -575,7 +579,7 @@ async fn run_cli_mode(
         .await
         .context("合并变速音频超时（超过 30 分钟）")??;
 
-        println!("完成！变速合并音频已保存到: {}", timed_output.display());
+        println!("✓ 变速合并完成: {}", timed_output.display());
 
         Ok::<(), anyhow::Error>(())
     }
