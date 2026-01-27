@@ -204,7 +204,7 @@ async fn start_task_handler(
         tx: tx.clone(),
         files: Arc::new(Mutex::new((srt_path.clone(), audio_path.clone()))),
         name: task_name.clone(),
-        status: Arc::new(RwLock::new("running".to_string())),
+        status: Arc::new(RwLock::new("idle".to_string())),
         created_at: SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs() as i64,
     };
     
@@ -231,16 +231,18 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
         let tx = task.tx.clone();
         let status = task.status.clone();
         
+        // 更新状态为运行中
+        {
+            let mut guard = status.write().await;
+            *guard = "running".to_string();
+        }
+        
         // 发送开始消息
         let _ = tx.send(WsMessage {
             task_id: task_id.to_string(),
             msg_type: "log".to_string(),
             content: format!("任务开始处理 - SRT: {:?}, 音频: {:?}", srt, audio),
         });
-        {
-            let mut guard = status.write().await;
-            *guard = "running".to_string();
-        }
         
         // 创建日志通道捕获 CLI 日志
         let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(100);
