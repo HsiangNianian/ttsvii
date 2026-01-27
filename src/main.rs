@@ -165,15 +165,56 @@ pub async fn run_cli_mode(
     audio: PathBuf,
     srt: PathBuf,
 ) -> Result<()> {
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    run_cli_mode_with_logger(
+        api_url,
+        output,
+        max_concurrent,
+        split_concurrent,
+        batch_size,
+        rest_duration,
+        retry_count,
+        audio,
+        srt,
+        tx,
+        None,
+    ).await
+}
+
+pub async fn run_cli_mode_with_logger(
+    api_url: String,
+    output: PathBuf,
+    max_concurrent: usize,
+    split_concurrent: usize,
+    batch_size: usize,
+    rest_duration: u64,
+    retry_count: u32,
+    audio: PathBuf,
+    srt: PathBuf,
+    log_tx: tokio::sync::mpsc::Sender<String>,
+    external_task_id: Option<String>,
+) -> Result<()> {
+    macro_rules! log {
+        ($($arg:tt)*) => {
+            {
+                let msg = format!($($arg)*);
+                println!("{}", msg);
+                let tx = log_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(msg).await;
+                });
+            }
+        };
+    }
+
     // 检查 ffmpeg
     audio::AudioSplitter::check_ffmpeg()
         .await
         .context("请确保已安装 ffmpeg 并在 PATH 中")?;
 
-    // 生成本次运行的 UUID
-    let task_uuid = Uuid::new_v4();
-    let uuid_str = task_uuid.to_string();
-    println!("任务 ID: {}", uuid_str);
+    // 生成或使用本次运行的 UUID
+    let uuid_str = external_task_id.unwrap_or_else(|| Uuid::new_v4().to_string());
+    log!("任务 ID: {}", uuid_str);
 
     // 创建输出目录
     tokio::fs::create_dir_all(&output).await?;
@@ -188,16 +229,16 @@ pub async fn run_cli_mode(
 
     // 使用 defer 模式确保临时目录被清理
     let result = async {
-        println!("正在解析 SRT 文件...");
+        log!("正在解析 SRT 文件...");
         let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
-        println!("找到 {} 个字幕条目", srt_entries.len());
+        log!("找到 {} 个字幕条目", srt_entries.len());
 
         if !srt_entries.is_empty() {
-            println!("\n前 3 个字幕条目的时间信息:");
+            log!("\n前 3 个字幕条目的时间信息:");
             for entry in srt_entries.iter().take(3) {
                 let start_ms = entry.start_time.num_milliseconds();
                 let end_ms = entry.end_time.num_milliseconds();
-                println!(
+                log!(
                     "  条目 {}: 开始={}ms ({:.3}s), 结束={}ms ({:.3}s), 时长={}ms ({:.3}s), 文本=\"{}\"",
                     entry.index,
                     start_ms,
@@ -214,7 +255,7 @@ pub async fn run_cli_mode(
         // 创建任务管理器
         let task_manager = TaskManager::new(srt_entries, &audio, &tmp_dir, &output_task_dir)?;
 
-        println!("正在切分音频文件（并发数: {}）...", split_concurrent);
+        log!("正在切分音频文件（并发数: {}）...", split_concurrent);
         task_manager
             .prepare_audio_segments(&audio, split_concurrent)
             .await?;
@@ -226,10 +267,10 @@ pub async fn run_cli_mode(
         let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
         executor.set_total(task_manager.len() as u64);
         if retry_count > 0 {
-            println!("失败重试次数: {}", retry_count);
+            log!("失败重试次数: {}", retry_count);
         }
 
-        println!(
+        log!(
             "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
             task_manager.len(),
             max_concurrent,
@@ -252,14 +293,58 @@ pub async fn run_cli_mode(
 
             // 检查是否超过最大重试轮数
             if retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty() {
-                println!("\n⚠️  重试已达到最大轮数 ({}), 仍有 {} 个任务失败", MAX_RETRY_ROUNDS, failed_task_indices.len());
-                println!("正在自动切换到恢复模式以继续处理...");
-                println!("\n任务 ID: {} (用于后续手动恢复)", uuid_str);
+                log!("\n⚠️  重试已达到最大轮数 ({}), 仍有 {} 个任务失败", MAX_RETRY_ROUNDS, failed_task_indices.len());
+                log!("正在自动切换到恢复模式以继续处理...");
+                log!("\n任务 ID: {} (用于后续手动恢复)", uuid_str);
                 break;
             }
             if retry_round > 1 {
-                println!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
-                println!("等待 60 秒后开始重试...");
+                log!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
+                log!("等待 60 秒后开始重试...");
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+
+        // 创建 API 客户端
+        let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
+
+        // 创建任务执行器
+        let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
+        executor.set_total(task_manager.len() as u64);
+        if retry_count > 0 {
+            log!("失败重试次数: {}", retry_count);
+        }
+
+        log!(
+            "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
+            task_manager.len(),
+            max_concurrent,
+            batch_size,
+            rest_duration
+        );
+
+        // 批次处理任务（带失败重试机制）
+        let tasks = task_manager.get_tasks();
+        // 动态批次大小，根据实时时延微调
+        let mut dynamic_batch_size = batch_size.max(1);
+        let mut batch_task_count = dynamic_batch_size * max_concurrent;
+        // 记录需要重试的任务（失败的任务索引）
+        let mut failed_task_indices: HashSet<usize> = HashSet::new();
+        let mut retry_round = 0;
+        const MAX_RETRY_ROUNDS: u32 = 3;
+
+        loop {
+            retry_round += 1;
+
+            // 检查是否超过最大重试轮数
+            if retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty() {
+                log!("\n⚠️  重试已达到最大轮数 ({}), 仍有 {} 个任务失败", MAX_RETRY_ROUNDS, failed_task_indices.len());
+                log!("正在自动切换到恢复模式以继续处理...");
+                log!("\n任务 ID: {} (用于后续手动恢复)", uuid_str);
+                break;
+            }
+            if retry_round > 1 {
+                log!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
+                log!("等待 60 秒后开始重试...");
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
@@ -276,21 +361,21 @@ pub async fn run_cli_mode(
             };
 
             if tasks_to_process.is_empty() {
-                println!("\n所有任务已完成！");
+                log!("\n所有任务已完成！");
                 break;
             }
 
             // 仅在第一轮时初始化进度条，后续轮数只更新进度数
             if retry_round == 1 {
                 executor.set_total(tasks_to_process.len() as u64);
-                println!(
+                log!(
                     "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
                     tasks_to_process.len(),
                     retry_round
                 );
             } else {
                 executor.set_total(tasks_to_process.len() as u64);
-                println!(
+                log!(
                     "本轮处理 {} 个失败任务...",
                     tasks_to_process.len()
                 );
@@ -334,18 +419,17 @@ pub async fn run_cli_mode(
 
                 if first_batch {
                     // 第一次初始化3行
-                    println!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
+                    log!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
                         batch_num, total_batches, batch_start + 1, batch_end, p50, p95);
-                    println!("{}", bar);
-                    println!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
+                    log!("{}", bar);
+                    log!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
                     first_batch = false;
                 } else {
-                    // 后续批次，向上3行覆盖
-                    print!("\x1b[3A\x1b[J"); // 向上3行，清除从这里到屏幕末尾
-                    println!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
+                    // 后续批次
+                    log!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
                         batch_num, total_batches, batch_start + 1, batch_end, p50, p95);
-                    println!("{}", bar);
-                    println!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
+                    log!("{}", bar);
+                    log!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
                 }
 
                 // p95 较高则缩小批次，p95 较低则放大到上限（2 倍初始）
@@ -379,10 +463,10 @@ pub async fn run_cli_mode(
             failed_task_indices = new_failed_indices;
 
             if failed_task_indices.is_empty() {
-                println!("\n本轮所有任务都已完成！");
+                log!("\n本轮所有任务都已完成！");
                 break;
             } else {
-                println!(
+                log!(
                     "\n本轮完成，仍有 {} 个任务失败，将在下一轮重试",
                     failed_task_indices.len()
                 );
@@ -394,7 +478,7 @@ pub async fn run_cli_mode(
         // 检查是否由于重试超限进入恢复模式
         let should_enter_resume_mode = retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty();
         if should_enter_resume_mode {
-            println!("\n[恢复模式] 进入恢复模式处理失败任务...");
+            log!("\n[恢复模式] 进入恢复模式处理失败任务...");
             // 直接调用恢复模式处理
             return resume_and_merge(
                 uuid_str,
@@ -408,11 +492,12 @@ pub async fn run_cli_mode(
                 retry_count,
                 audio,
                 srt,
+                log_tx.clone(),
             )
             .await;
         }
 
-        println!("\n所有任务执行完成，开始音频可用性校验...");
+        log!("\n所有任务执行完成，开始音频可用性校验...");
 
         // 音频可用性校验
         let mut invalid_audio_indices: HashSet<usize> = HashSet::new();
@@ -421,7 +506,7 @@ pub async fn run_cli_mode(
         loop {
             validation_round += 1;
             if validation_round > 1 {
-                println!("第 {} 轮重试...", validation_round - 1);
+                log!("第 {} 轮重试...", validation_round - 1);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
@@ -438,11 +523,11 @@ pub async fn run_cli_mode(
             };
 
             if tasks_to_validate.is_empty() {
-                println!("所有音频校验通过！");
+                log!("所有音频校验通过！");
                 break;
             }
 
-            println!(
+            log!(
                 "校验 {} 个音频文件（第 {} 轮）...",
                 tasks_to_validate.len(),
                 validation_round
@@ -455,7 +540,7 @@ pub async fn run_cli_mode(
                         // 校验通过
                     }
                     Err(e) => {
-                        eprintln!(
+                        log!(
                             "✗ 任务 {} 校验失败: {}",
                             task.entry.index, e
                         );
@@ -466,9 +551,9 @@ pub async fn run_cli_mode(
                 }
             }
 
-            // 如果有无效的音频，需要重新执行这些任务
+            // 如果有无效的音频，需要重新执行 these 任务
             if !new_invalid_indices.is_empty() {
-                println!(
+                log!(
                     "发现 {} 个无效文件，重新生成...",
                     new_invalid_indices.len()
                 );
@@ -501,7 +586,7 @@ pub async fn run_cli_mode(
                     let _ = futures::future::join_all(futures).await;
                     
                     let (success, failure) = executor.get_stats();
-                    println!(
+                    log!(
                         "✓ 重生成进度 {}/{} | 成功: {} | 失败: {}",
                         success + failure,
                         tasks_to_retry.len(),
@@ -538,12 +623,12 @@ pub async fn run_cli_mode(
             }
 
             if invalid_audio_indices.is_empty() && failed_task_indices.is_empty() {
-                println!("所有音频校验通过！");
+                log!("所有音频校验通过！");
                 break;
             }
         }
 
-        println!("收集音频文件用于合并...");
+        log!("收集音频文件用于合并...");
 
         // 收集所有合成的音频文件及其对应的 SRT 条目（只包含实际存在的文件）
         let mut audio_files = Vec::new();
@@ -565,7 +650,7 @@ pub async fn run_cli_mode(
             anyhow::bail!("没有有效的合成音频文件可以合并");
         }
 
-        println!("找到 {} 个有效的音频文件，开始合并...", audio_files.len());
+        log!("找到 {} 个有效的音频文件，开始合并...", audio_files.len());
 
         // 合并音频（保存到 output/{uuid}.wav）
         let final_output = output.join(format!("{}.wav", uuid_str));
@@ -577,12 +662,11 @@ pub async fn run_cli_mode(
         .await
         .context("合并音频超时（超过 30 分钟）")??;
 
-        println!("✓ 原始合并完成: {}", final_output.display());
+        log!("✓ 原始合并完成: {}", final_output.display());
 
         // 生成根据 SRT 时间戳变速后的合并音频
         let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-        print!("变速处理: ");
-        std::io::Write::flush(&mut std::io::stdout()).ok();
+        log!("开始变速处理...");
         tokio::time::timeout(
             std::time::Duration::from_secs(1800), // 30 分钟
             audio::AudioSplitter::merge_audio_with_timing(
@@ -590,19 +674,13 @@ pub async fn run_cli_mode(
                 &srt_entries_for_merge,
                 &timed_output,
                 &audio, // 传入原始音频/视频路径
-                Some(|current: usize, total: usize, msg: String| {
-                    print!("\r变速处理: [{}{}] {}/{} - {}", 
-                        "=".repeat((current * 40 / total).max(1)),
-                        " ".repeat(40 - (current * 40 / total).max(1)),
-                        current, total, msg);
-                    std::io::Write::flush(&mut std::io::stdout()).ok();
-                }),
+                None,
             ),
         )
         .await
         .context("合并变速音频超时（超过 30 分钟）")??;
 
-        println!("\r✓ 变速合并完成: {}", timed_output.display());
+        log!("✓ 变速合并完成: {}", timed_output.display());
 
         Ok::<(), anyhow::Error>(())
     }
@@ -621,7 +699,47 @@ async fn resume_cli_task(
     audio: Option<PathBuf>,
     srt: PathBuf,
 ) -> Result<()> {
-    println!("正在尝试恢复任务: {}", uuid);
+    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    resume_cli_task_with_logger(
+        uuid,
+        api_url,
+        output,
+        max_concurrent,
+        batch_size,
+        rest_duration,
+        retry_count,
+        audio,
+        srt,
+        tx,
+    )
+    .await
+}
+
+async fn resume_cli_task_with_logger(
+    uuid: String,
+    api_url: String,
+    output: PathBuf,
+    max_concurrent: usize,
+    batch_size: usize,
+    rest_duration: u64,
+    retry_count: u32,
+    audio: Option<PathBuf>,
+    srt: PathBuf,
+    log_tx: tokio::sync::mpsc::Sender<String>,
+) -> Result<()> {
+    macro_rules! log {
+        ($($arg:tt)*) => {
+            {
+                let msg = format!($($arg)*);
+                println!("{}", msg);
+                let tx = log_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(msg).await;
+                });
+            }
+        };
+    }
+    log!("正在尝试恢复任务: {}", uuid);
     let uuid_str = uuid.clone();
 
     // 1. 定位目录
@@ -633,23 +751,17 @@ async fn resume_cli_task(
     }
 
     if !output_task_dir.exists() {
-        println!("输出目录不存在，将重新创建: {:?}", output_task_dir);
+        log!("输出目录不存在，将重新创建: {:?}", output_task_dir);
         tokio::fs::create_dir_all(&output_task_dir).await?;
     }
 
     // 2. 解析 SRT 文件重建任务列表
-    println!("正在解析 SRT 文件...");
+    log!("正在解析 SRT 文件...");
     let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
 
-    // 按索引排序
-    // srt_entries 应该是已经按解析顺序排好的，但为了保险起见
-    // 注意：SrtParser 内部已经做了排序和规范化
-
-    println!("成功解析 SRT 文件: {} 个条目", srt_entries.len());
+    log!("成功解析 SRT 文件: {} 个条目", srt_entries.len());
 
     // 3. 构建 TaskManager
-    // TaskManager 需要 audio_path 来构建 Task，但实际上 resume 模式下主要用 tmp_dir 和输出路径
-    // 我们可以传入一个空的 PathBuf 或者实际的 audio path（如果存在）
     let dummy_audio_path = audio.clone().unwrap_or_else(|| PathBuf::from(""));
     let task_manager = TaskManager::new(
         srt_entries.clone(),
@@ -687,7 +799,7 @@ async fn resume_cli_task(
         }
     }
 
-    println!(
+    log!(
         "总任务数: {} | 已完成: {} | 待处理: {}",
         tasks.len(),
         tasks.len() - initial_pending_indices.len(),
@@ -695,7 +807,7 @@ async fn resume_cli_task(
     );
 
     if initial_pending_indices.is_empty() {
-        println!("所有任务均已完成，直接进行合并步骤。");
+        log!("所有任务均已完成，直接进行合并步骤。");
     } else {
         executor.set_total(initial_pending_indices.len() as u64);
 
@@ -710,8 +822,8 @@ async fn resume_cli_task(
                 if failed_task_indices.is_empty() {
                     break;
                 }
-                println!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
-                println!("等待 60 秒后开始重试...");
+                log!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
+                log!("等待 60 秒后开始重试...");
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
@@ -731,7 +843,7 @@ async fn resume_cli_task(
                 break;
             }
 
-            println!(
+            log!(
                 "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
                 tasks_to_process.len(),
                 retry_round
@@ -775,15 +887,15 @@ async fn resume_cli_task(
 
                 if first_batch {
                     // 第一次初始化3行
-                    println!(
+                    log!(
                         "批次 {}/{}: 处理任务 {}-{}",
                         batch_num,
                         total_batches,
                         batch_start + 1,
                         batch_end
                     );
-                    println!("{}", bar);
-                    println!(
+                    log!("{}", bar);
+                    log!(
                         "进度 {}/{} | 成功:{} 失败:{}",
                         success + failure,
                         tasks_to_process.len(),
@@ -792,17 +904,16 @@ async fn resume_cli_task(
                     );
                     first_batch = false;
                 } else {
-                    // 后续批次，向上3行覆盖
-                    print!("\x1b[3A\x1b[J"); // 向上3行，清除从这里到屏幕末尾
-                    println!(
+                    // 后续批次
+                    log!(
                         "批次 {}/{}: 处理任务 {}-{}",
                         batch_num,
                         total_batches,
                         batch_start + 1,
                         batch_end
                     );
-                    println!("{}", bar);
-                    println!(
+                    log!("{}", bar);
+                    log!(
                         "进度 {}/{} | 成功:{} 失败:{}",
                         success + failure,
                         tasks_to_process.len(),
@@ -825,7 +936,7 @@ async fn resume_cli_task(
             failed_task_indices = new_failed_indices;
 
             if failed_task_indices.is_empty() && retry_round == 1 {
-                println!("\n本轮所有任务都已完成！");
+                log!("\n本轮所有任务都已完成！");
                 break;
             }
             if failed_task_indices.is_empty() {
@@ -836,7 +947,7 @@ async fn resume_cli_task(
         executor.finish();
     }
 
-    println!("\n所有任务执行完成，开始音频可用性校验...");
+    log!("\n所有任务执行完成，开始音频可用性校验...");
     // 校验，主要为了确保合并时文件有效
     let mut audio_files = Vec::new();
     let mut srt_entries_for_merge = Vec::new();
@@ -851,13 +962,13 @@ async fn resume_cli_task(
                 audio_files.push(task.output_path.clone());
                 srt_entries_for_merge.push(task.entry.clone());
             } else {
-                eprintln!(
+                log!(
                     "警告: 任务 {} 输出文件无效 (过小)，跳过合并",
                     task.entry.index
                 );
             }
         } else {
-            eprintln!("警告: 任务 {} 输出文件缺失，跳过合并", task.entry.index);
+            log!("警告: 任务 {} 输出文件缺失，跳过合并", task.entry.index);
         }
     }
 
@@ -865,11 +976,11 @@ async fn resume_cli_task(
         anyhow::bail!("没有有效的合成音频文件可以合并");
     }
 
-    println!("找到 {} 个有效的音频文件用于合并", audio_files.len());
+    log!("找到 {} 个有效的音频文件用于合并", audio_files.len());
 
     // 合并音频
     let final_output = output.join(format!("{}.wav", uuid_str));
-    println!(
+    log!(
         "开始合并 {} 个音频文件到: {}",
         audio_files.len(),
         final_output.display()
@@ -882,14 +993,13 @@ async fn resume_cli_task(
     .await
     .context("合并音频超时")??;
 
-    println!("完成！原始合并音频已保存到: {}", final_output.display());
+    log!("完成！原始合并音频已保存到: {}", final_output.display());
 
     // 变速合并
     if let Some(audio_path) = audio {
         if audio_path.exists() {
             let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-            print!("变速处理: ");
-            std::io::Write::flush(&mut std::io::stdout()).ok();
+            log!("开始变速处理...");
             tokio::time::timeout(
                 std::time::Duration::from_secs(1800),
                 audio::AudioSplitter::merge_audio_with_timing(
@@ -897,27 +1007,17 @@ async fn resume_cli_task(
                     &srt_entries_for_merge,
                     &timed_output,
                     &audio_path,
-                    Some(|current: usize, total: usize, msg: String| {
-                        print!(
-                            "\r变速处理: [{}{}] {}/{} - {}",
-                            "=".repeat((current * 40 / total).max(1)),
-                            " ".repeat(40 - (current * 40 / total).max(1)),
-                            current,
-                            total,
-                            msg
-                        );
-                        std::io::Write::flush(&mut std::io::stdout()).ok();
-                    }),
+                    None, // 在 Web 模式下暂时关闭内部进度打印，或者也需要重构
                 ),
             )
             .await
             .context("合并变速音频超时")??;
-            println!("\r✓ 变速合并完成: {}", timed_output.display());
+            log!("✓ 变速合并完成: {}", timed_output.display());
         } else {
-            println!("✗ 原始音频文件不存在: {:?}，跳过变速合并。", audio_path);
+            log!("✗ 原始音频文件不存在: {:?}，跳过变速合并。", audio_path);
         }
     } else {
-        println!("✓ 未提供原始音频，跳过变速合并。");
+        log!("✓ 未提供原始音频，跳过变速合并。");
     }
 
     Ok(())
@@ -936,10 +1036,23 @@ async fn resume_and_merge(
     retry_count: u32,
     audio: PathBuf,
     srt: PathBuf,
+    log_tx: tokio::sync::mpsc::Sender<String>,
 ) -> Result<()> {
-    println!("\n[恢复] 正在解析 SRT 文件...");
+    macro_rules! log {
+        ($($arg:tt)*) => {
+            {
+                let msg = format!($($arg)*);
+                println!("{}", msg);
+                let tx = log_tx.clone();
+                tokio::spawn(async move {
+                    let _ = tx.send(msg).await;
+                });
+            }
+        };
+    }
+    log!("\n[恢复] 正在解析 SRT 文件...");
     let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
-    println!("[恢复] 成功解析 SRT 文件: {} 个条目", srt_entries.len());
+    log!("[恢复] 成功解析 SRT 文件: {} 个条目", srt_entries.len());
 
     let dummy_audio_path = PathBuf::from("");
     let task_manager = TaskManager::new(
@@ -971,7 +1084,7 @@ async fn resume_and_merge(
         }
     }
 
-    println!(
+    log!(
         "[恢复] 待处理任务: {} / {}",
         pending_indices.len(),
         tasks.len()
@@ -991,7 +1104,7 @@ async fn resume_and_merge(
                 if failed_indices.is_empty() {
                     break;
                 }
-                println!("\n[恢复] 第 {} 轮重试...", retry_round - 1);
+                log!("\n[恢复] 第 {} 轮重试...", retry_round - 1);
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
@@ -1011,7 +1124,7 @@ async fn resume_and_merge(
                 break;
             }
 
-            println!(
+            log!(
                 "[恢复] 处理 {} 个任务（第 {} 轮）...",
                 tasks_to_process.len(),
                 retry_round
@@ -1036,7 +1149,7 @@ async fn resume_and_merge(
                 let _ = futures::future::join_all(futures).await;
 
                 let (success, failure) = executor.get_stats();
-                println!(
+                log!(
                     "[恢复] 进度 {}/{} | 成功: {} | 失败: {}",
                     success + failure,
                     tasks_to_process.len(),
@@ -1065,7 +1178,7 @@ async fn resume_and_merge(
         executor.finish();
     }
 
-    println!("\n[恢复] 收集音频文件用于合并...");
+    log!("\n[恢复] 收集音频文件用于合并...");
 
     let mut audio_files = Vec::new();
     let mut srt_entries_for_merge = Vec::new();
@@ -1086,7 +1199,7 @@ async fn resume_and_merge(
         anyhow::bail!("没有有效的合成音频文件可以合并");
     }
 
-    println!(
+    log!(
         "[恢复] 找到 {} 个有效的音频文件，开始合并...",
         audio_files.len()
     );
@@ -1099,7 +1212,7 @@ async fn resume_and_merge(
     .await
     .context("合并音频超时（超过 30 分钟）")??;
 
-    println!("[恢复] 原始合并完成: {}", final_output.display());
+    log!("[恢复] 原始合并完成: {}", final_output.display());
 
     let timed_output = output.join(format!("{}_timed.wav", uuid_str));
     tokio::time::timeout(
@@ -1115,7 +1228,8 @@ async fn resume_and_merge(
     .await
     .context("合并变速音频超时（超过 30 分钟）")??;
 
-    println!("[恢复] 变速合并完成: {}", timed_output.display());
+    log!("[恢复] 变速合并完成: {}", timed_output.display());
 
     Ok(())
+}
 }

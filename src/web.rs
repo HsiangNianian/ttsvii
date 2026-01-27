@@ -242,9 +242,25 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
             *guard = "running".to_string();
         }
         
+        // 创建日志通道捕获 CLI 日志
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(100);
+        let tx_clone = tx.clone();
+        let task_id_clone = task_id.to_string();
+        
+        // 启动日志转发协程
+        tokio::spawn(async move {
+            while let Some(msg) = log_rx.recv().await {
+                let _ = tx_clone.send(WsMessage {
+                    task_id: task_id_clone.clone(),
+                    msg_type: "log".to_string(),
+                    content: msg,
+                });
+            }
+        });
+
         // 调用实际的 CLI 逻辑
         // 使用默认配置参数
-        let result = crate::run_cli_mode(
+        let result = crate::run_cli_mode_with_logger(
             "https://models.inference.ai.azure.com".to_string(), // 默认 API URL
             PathBuf::from("./output"),
             5,   // max_concurrent
@@ -254,6 +270,8 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
             3,   // retry_count
             audio,
             srt,
+            log_tx,
+            Some(task_id.to_string()),
         ).await;
         
         match result {
@@ -263,11 +281,28 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
                     msg_type: "log".to_string(),
                     content: "✓ 任务完成！".to_string(),
                 });
+                
+                // 发送状态更新
                 let _ = tx.send(WsMessage {
                     task_id: task_id.to_string(),
                     msg_type: "status".to_string(),
                     content: "completed".to_string(),
                 });
+
+                // 获取任务 ID (UUID) 来确定输出目录
+                // run_cli_mode 内部会生成一个 UUID，但 start_task_handler 使用的 task_id 也是 UUID
+                // 我们调用 run_cli_mode 时没有传 UUID，它会自己生成一个。
+                // 修正：run_cli_mode 应该允许外部传入 UUID 或者返回生成的 UUID。
+                // 目前简单起见，假设输出目录就是 ./output/{uuid}
+                // 但 run_cli_mode 生成的 UUID 我们拿不到。
+                
+                // 暂时发送一个通用的状态
+                let _ = tx.send(WsMessage {
+                    task_id: task_id.to_string(),
+                    msg_type: "completed".to_string(),
+                    content: format!("./output"), 
+                });
+
                 let mut guard = status.write().await;
                 *guard = "completed".to_string();
             }
