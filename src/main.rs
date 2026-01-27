@@ -3,6 +3,7 @@ mod audio;
 mod srt;
 mod task;
 mod web;
+mod log_capture;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -119,7 +120,8 @@ async fn start_webui() -> Result<()> {
     use tokio::net::TcpListener;
     use tokio::time::{sleep, Duration};
 
-    let app = web::create_router().await;
+    let state = web::AppState::new();
+    let app = web::create_router(state).await;
     let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
     let url = format!("http://{}", addr);
 
@@ -152,7 +154,7 @@ async fn start_webui() -> Result<()> {
     Ok(())
 }
 
-async fn run_cli_mode(
+pub async fn run_cli_mode(
     api_url: String,
     output: PathBuf,
     max_concurrent: usize,
