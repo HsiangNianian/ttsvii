@@ -1215,18 +1215,18 @@ async fn get_status(State(state): State<AppState>) -> Json<TaskStatus> {
 
 async fn get_uuids() -> Json<serde_json::Value> {
     let mut uuids = Vec::new();
-    
+
     // 扫描 tmp 和 output 目录
     let current_dir = match std::env::current_dir() {
         Ok(dir) => dir,
         Err(_) => return Json(serde_json::json!({ "uuids": [] })),
     };
-    
+
     let tmp_dir = current_dir.join("tmp");
     let output_dir = current_dir.join("output");
-    
+
     let mut uuid_set = std::collections::HashSet::new();
-    
+
     // 从 tmp 目录收集
     if let Ok(entries) = std::fs::read_dir(&tmp_dir) {
         for entry in entries.flatten() {
@@ -1240,7 +1240,7 @@ async fn get_uuids() -> Json<serde_json::Value> {
             }
         }
     }
-    
+
     // 从 output 目录收集
     if let Ok(entries) = std::fs::read_dir(&output_dir) {
         for entry in entries.flatten() {
@@ -1253,25 +1253,21 @@ async fn get_uuids() -> Json<serde_json::Value> {
             }
         }
     }
-    
+
     // 获取修改时间并排序
     for uuid in uuid_set {
         let tmp_path = tmp_dir.join(&uuid);
         let output_path = output_dir.join(&uuid);
-        
+
         // 优先使用 tmp 目录的修改时间
-        let metadata = tmp_path.metadata()
-            .or_else(|_| output_path.metadata());
-        
-        let modified = metadata
-            .and_then(|m| m.modified())
-            .ok()
-            .and_then(|t| {
-                t.duration_since(std::time::UNIX_EPOCH)
-                    .ok()
-                    .map(|d| d.as_secs())
-            });
-        
+        let metadata = tmp_path.metadata().or_else(|_| output_path.metadata());
+
+        let modified = metadata.and_then(|m| m.modified()).ok().and_then(|t| {
+            t.duration_since(std::time::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs())
+        });
+
         uuids.push(serde_json::json!({
             "uuid": uuid,
             "modified": modified.map(|t| {
@@ -1282,14 +1278,14 @@ async fn get_uuids() -> Json<serde_json::Value> {
             }).unwrap_or_else(|| "未知".to_string())
         }));
     }
-    
+
     // 按修改时间降序排序（最新的在前）
     uuids.sort_by(|a, b| {
         b.get("modified")
             .and_then(|v| v.as_str())
             .cmp(&a.get("modified").and_then(|v| v.as_str()))
     });
-    
+
     Json(serde_json::json!({ "uuids": uuids }))
 }
 

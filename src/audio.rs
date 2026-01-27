@@ -346,7 +346,7 @@ impl AudioSplitter {
 
                 // 使用 ffmpeg 追加静音
                 let silence_filter = format!("apad=pad_dur={:.3}", silence_duration_sec);
-                
+
                 let output = tokio::process::Command::new("ffmpeg")
                     .arg("-loglevel")
                     .arg("error")
@@ -368,17 +368,10 @@ impl AudioSplitter {
 
                 if !output.status.success() {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    anyhow::bail!(
-                        "ffmpeg 追加静音失败 (文件: {:?}): {}",
-                        audio_file,
-                        stderr
-                    );
+                    anyhow::bail!("ffmpeg 追加静音失败 (文件: {:?}): {}", audio_file, stderr);
                 }
 
-                println!(
-                    "[变速] 任务 {}: ✅ 静音追加完成",
-                    i + 1
-                );
+                println!("[变速] 任务 {}: ✅ 静音追加完成", i + 1);
                 processed_files.push(processed_file);
             } else {
                 // 使用 atempo 滤镜调整速度

@@ -295,16 +295,12 @@ async fn run_cli_mode(
             }
 
             // 按批次处理
+            let mut first_batch = true;
             for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
                 let batch_num = (batch_start / batch_task_count) + 1;
                 let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
                 let batch_tasks = &tasks_to_process[batch_start..batch_end];
                 let total_batches = (tasks_to_process.len() + batch_task_count - 1) / batch_task_count;
-
-                println!(
-                    "批次 {}/{}: 处理任务 {}-{}",
-                    batch_num, total_batches, batch_start + 1, batch_end
-                );
 
                 // 执行当前批次
                 let futures: Vec<_> = batch_tasks
@@ -318,15 +314,37 @@ async fn run_cli_mode(
 
                 let _ = futures::future::join_all(futures).await;
 
-                // 批次完成后统一打印一次统计信息
+                // 批次完成后统一更新一次统计信息
                 let (p50, p95, _, _) = executor.metrics_snapshot();
                 let (success, failure) = executor.get_stats();
                 let completed = success + failure;
                 
-                println!(
-                    "✓ 时延p50={:.0}ms p95={:.0}ms | 进度{}/{} | 成功:{} 失败:{} | 批次大小={} 并发={}",
-                    p50, p95, completed, tasks_to_process.len(), success, failure, dynamic_batch_size, max_concurrent
+                // 生成进度条
+                let bar_width: usize = 40;
+                let filled = ((completed as f64 / tasks_to_process.len() as f64) * bar_width as f64) as usize;
+                let bar = format!(
+                    "[{}{}] {}/{}",
+                    "=".repeat(filled),
+                    " ".repeat(bar_width.saturating_sub(filled)),
+                    completed,
+                    tasks_to_process.len()
                 );
+
+                if first_batch {
+                    // 第一次初始化3行
+                    println!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
+                        batch_num, total_batches, batch_start + 1, batch_end, p50, p95);
+                    println!("{}", bar);
+                    println!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
+                    first_batch = false;
+                } else {
+                    // 后续批次，向上3行覆盖
+                    print!("\x1b[3A\x1b[J"); // 向上3行，清除从这里到屏幕末尾
+                    println!("批次 {}/{}: 处理任务 {}-{} | p50={:.0}ms p95={:.0}ms", 
+                        batch_num, total_batches, batch_start + 1, batch_end, p50, p95);
+                    println!("{}", bar);
+                    println!("进度 {}/{} | 成功:{} 失败:{}", completed, tasks_to_process.len(), success, failure);
+                }
 
                 // p95 较高则缩小批次，p95 较低则放大到上限（2 倍初始）
                 if p95 > 4000.0 && dynamic_batch_size > 1 {
@@ -338,7 +356,6 @@ async fn run_cli_mode(
 
                 // 如果不是最后一批，休息一下
                 if batch_end < tasks_to_process.len() {
-                    println!("休息 {} 秒...", rest_duration);
                     tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
                 }
             }
@@ -350,8 +367,6 @@ async fn run_cli_mode(
                 let task = &tasks[*original_idx];
                 // 检查任务是否成功（文件是否存在且有效）
                 if task.output_path.exists() {
-                    // 文件存在，检查是否有效（稍后会统一校验）
-                    // 这里先假设存在就是成功，后续会统一校验
                 } else {
                     // 文件不存在，标记为失败
                     new_failed_indices.insert(*original_idx);
@@ -564,7 +579,8 @@ async fn run_cli_mode(
 
         // 生成根据 SRT 时间戳变速后的合并音频
         let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-        println!("生成变速合并音频...");
+        print!("变速处理: ");
+        std::io::Write::flush(&mut std::io::stdout()).ok();
         tokio::time::timeout(
             std::time::Duration::from_secs(1800), // 30 分钟
             audio::AudioSplitter::merge_audio_with_timing(
@@ -572,14 +588,19 @@ async fn run_cli_mode(
                 &srt_entries_for_merge,
                 &timed_output,
                 &audio, // 传入原始音频/视频路径
-                // 不在这里打印日志，让进度条自己显示
-                None::<fn(usize, usize, String)>,
+                Some(|current: usize, total: usize, msg: String| {
+                    print!("\r变速处理: [{}{}] {}/{} - {}", 
+                        "=".repeat((current * 40 / total).max(1)),
+                        " ".repeat(40 - (current * 40 / total).max(1)),
+                        current, total, msg);
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                }),
             ),
         )
         .await
         .context("合并变速音频超时（超过 30 分钟）")??;
 
-        println!("✓ 变速合并完成: {}", timed_output.display());
+        println!("\r✓ 变速合并完成: {}", timed_output.display());
 
         Ok::<(), anyhow::Error>(())
     }
@@ -717,18 +738,13 @@ async fn resume_cli_task(
             executor.set_total(tasks_to_process.len() as u64);
 
             let mut batch_num = 0;
+            let mut first_batch = true;
             for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
                 batch_num += 1;
                 let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
                 let batch_tasks = &tasks_to_process[batch_start..batch_end];
-
-                println!(
-                    "\n批次 {}/{}: 处理任务 {}-{}",
-                    batch_num,
-                    (tasks_to_process.len() + batch_task_count - 1) / batch_task_count,
-                    batch_start + 1,
-                    batch_end
-                );
+                let total_batches =
+                    (tasks_to_process.len() + batch_task_count - 1) / batch_task_count;
 
                 let futures: Vec<_> = batch_tasks
                     .iter()
@@ -742,15 +758,58 @@ async fn resume_cli_task(
                 let _ = futures::future::join_all(futures).await;
 
                 let (success, failure) = executor.get_stats();
-                println!(
-                    "实时统计: 进度/{} | 成功: {} | 失败: {}",
-                    tasks_to_process.len(),
-                    success,
-                    failure
+
+                // 生成进度条
+                let bar_width: usize = 40;
+                let filled = (((success + failure) as f64 / tasks_to_process.len() as f64)
+                    * bar_width as f64) as usize;
+                let bar = format!(
+                    "[{}{}] {}/{}",
+                    "=".repeat(filled),
+                    " ".repeat(bar_width.saturating_sub(filled)),
+                    success + failure,
+                    tasks_to_process.len()
                 );
 
+                if first_batch {
+                    // 第一次初始化3行
+                    println!(
+                        "批次 {}/{}: 处理任务 {}-{}",
+                        batch_num,
+                        total_batches,
+                        batch_start + 1,
+                        batch_end
+                    );
+                    println!("{}", bar);
+                    println!(
+                        "进度 {}/{} | 成功:{} 失败:{}",
+                        success + failure,
+                        tasks_to_process.len(),
+                        success,
+                        failure
+                    );
+                    first_batch = false;
+                } else {
+                    // 后续批次，向上3行覆盖
+                    print!("\x1b[3A\x1b[J"); // 向上3行，清除从这里到屏幕末尾
+                    println!(
+                        "批次 {}/{}: 处理任务 {}-{}",
+                        batch_num,
+                        total_batches,
+                        batch_start + 1,
+                        batch_end
+                    );
+                    println!("{}", bar);
+                    println!(
+                        "进度 {}/{} | 成功:{} 失败:{}",
+                        success + failure,
+                        tasks_to_process.len(),
+                        success,
+                        failure
+                    );
+                }
+
                 if batch_end < tasks_to_process.len() {
-                    println!("休息 {} 秒...", rest_duration);
                     tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
                 }
             }
@@ -775,8 +834,8 @@ async fn resume_cli_task(
         executor.finish();
     }
 
-    println!("\n所有任务执行完成，开始音频可用性校验（简略版）...");
-    // 简略版校验，主要为了确保合并时文件有效
+    println!("\n所有任务执行完成，开始音频可用性校验...");
+    // 校验，主要为了确保合并时文件有效
     let mut audio_files = Vec::new();
     let mut srt_entries_for_merge = Vec::new();
     let mut sorted_tasks: Vec<_> = tasks.iter().collect();
@@ -827,7 +886,8 @@ async fn resume_cli_task(
     if let Some(audio_path) = audio {
         if audio_path.exists() {
             let timed_output = output.join(format!("{}_timed.wav", uuid_str));
-            println!("\n开始生成根据 SRT 时间戳变速后的合并音频...");
+            print!("变速处理: ");
+            std::io::Write::flush(&mut std::io::stdout()).ok();
             tokio::time::timeout(
                 std::time::Duration::from_secs(1800),
                 audio::AudioSplitter::merge_audio_with_timing(
@@ -835,17 +895,27 @@ async fn resume_cli_task(
                     &srt_entries_for_merge,
                     &timed_output,
                     &audio_path,
-                    None::<fn(usize, usize, String)>,
+                    Some(|current: usize, total: usize, msg: String| {
+                        print!(
+                            "\r变速处理: [{}{}] {}/{} - {}",
+                            "=".repeat((current * 40 / total).max(1)),
+                            " ".repeat(40 - (current * 40 / total).max(1)),
+                            current,
+                            total,
+                            msg
+                        );
+                        std::io::Write::flush(&mut std::io::stdout()).ok();
+                    }),
                 ),
             )
             .await
             .context("合并变速音频超时")??;
-            println!("完成！变速合并音频已保存到: {}", timed_output.display());
+            println!("\r✓ 变速合并完成: {}", timed_output.display());
         } else {
-            println!("指定的原始音频文件不存在: {:?}，跳过变速合并。", audio_path);
+            println!("✗ 原始音频文件不存在: {:?}，跳过变速合并。", audio_path);
         }
     } else {
-        println!("未提供原始音频文件，跳过变速合并步骤。");
+        println!("✓ 未提供原始音频，跳过变速合并。");
     }
 
     Ok(())

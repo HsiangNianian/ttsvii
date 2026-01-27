@@ -152,7 +152,8 @@ impl TaskExecutor {
 
                     // 如果不是最后一次尝试，等待后重试
                     if attempt < max_attempts {
-                        let delay_ms = classify_backoff_delay(&last_error.as_ref().unwrap(), attempt);
+                        let delay_ms =
+                            classify_backoff_delay(&last_error.as_ref().unwrap(), attempt);
                         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
                         continue;
                     }
