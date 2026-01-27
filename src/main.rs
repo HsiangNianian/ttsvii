@@ -304,50 +304,6 @@ pub async fn run_cli_mode_with_logger(
                 tokio::time::sleep(std::time::Duration::from_secs(60)).await;
             }
 
-        // 创建 API 客户端
-        let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
-
-        // 创建任务执行器
-        let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
-        executor.set_total(task_manager.len() as u64);
-        if retry_count > 0 {
-            log!("失败重试次数: {}", retry_count);
-        }
-
-        log!(
-            "开始处理 {} 个任务（并发数: {}, 批次大小: {}, 休息时间: {}s）...",
-            task_manager.len(),
-            max_concurrent,
-            batch_size,
-            rest_duration
-        );
-
-        // 批次处理任务（带失败重试机制）
-        let tasks = task_manager.get_tasks();
-        // 动态批次大小，根据实时时延微调
-        let mut dynamic_batch_size = batch_size.max(1);
-        let mut batch_task_count = dynamic_batch_size * max_concurrent;
-        // 记录需要重试的任务（失败的任务索引）
-        let mut failed_task_indices: HashSet<usize> = HashSet::new();
-        let mut retry_round = 0;
-        const MAX_RETRY_ROUNDS: u32 = 3;
-
-        loop {
-            retry_round += 1;
-
-            // 检查是否超过最大重试轮数
-            if retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty() {
-                log!("\n⚠️  重试已达到最大轮数 ({}), 仍有 {} 个任务失败", MAX_RETRY_ROUNDS, failed_task_indices.len());
-                log!("正在自动切换到恢复模式以继续处理...");
-                log!("\n任务 ID: {} (用于后续手动恢复)", uuid_str);
-                break;
-            }
-            if retry_round > 1 {
-                log!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
-                log!("等待 60 秒后开始重试...");
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-            }
-
             // 确定本次要处理的任务
             let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
                 // 第一轮：处理所有任务
@@ -446,9 +402,7 @@ pub async fn run_cli_mode_with_logger(
                 }
             }
 
-            // 检查本轮结果，更新失败任务列表
             let mut new_failed_indices = HashSet::new();
-            let mut skipped: Vec<(usize, String)> = Vec::new();
             for (original_idx, _) in tasks_to_process.iter() {
                 let task = &tasks[*original_idx];
                 // 检查任务是否成功（文件是否存在且有效）
@@ -674,7 +628,7 @@ pub async fn run_cli_mode_with_logger(
                 &srt_entries_for_merge,
                 &timed_output,
                 &audio, // 传入原始音频/视频路径
-                None,
+                None::<fn(usize, usize, String)>,
             ),
         )
         .await
@@ -1007,7 +961,7 @@ async fn resume_cli_task_with_logger(
                     &srt_entries_for_merge,
                     &timed_output,
                     &audio_path,
-                    None, // 在 Web 模式下暂时关闭内部进度打印，或者也需要重构
+                    None::<fn(usize, usize, String)>, // 在 Web 模式下暂时关闭内部进度打印，或者也需要重构
                 ),
             )
             .await
@@ -1231,5 +1185,4 @@ async fn resume_and_merge(
     log!("[恢复] 变速合并完成: {}", timed_output.display());
 
     Ok(())
-}
 }
