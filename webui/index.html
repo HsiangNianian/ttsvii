@@ -617,6 +617,60 @@
         let currentTaskId = null;
         let ws = null;
 
+        // localStorage 操作
+        const TASKS_STORAGE_KEY = 'ttsvii_tasks';
+        
+        function saveTasks() {
+            // 只保存基本信息，不保存文件对象
+            const serialized = {};
+            Object.entries(tasks).forEach(([id, task]) => {
+                serialized[id] = {
+                    id: task.id,
+                    name: task.name,
+                    state: task.state,
+                    createTime: task.createTime.getTime(),
+                    config: {
+                        apiUrl: task.config.apiUrl,
+                        maxConcurrent: task.config.maxConcurrent,
+                        splitConcurrent: task.config.splitConcurrent,
+                        batchSize: task.config.batchSize,
+                        restDuration: task.config.restDuration,
+                        retryCount: task.config.retryCount
+                        // 不保存文件对象
+                    }
+                };
+            });
+            localStorage.setItem(TASKS_STORAGE_KEY, JSON.stringify(serialized));
+        }
+
+        function loadTasksFromStorage() {
+            try {
+                const stored = localStorage.getItem(TASKS_STORAGE_KEY);
+                if (!stored) return {};
+                
+                const parsed = JSON.parse(stored);
+                const restored = {};
+                
+                Object.entries(parsed).forEach(([id, data]) => {
+                    restored[id] = {
+                        ...data,
+                        createTime: new Date(data.createTime),
+                        logs: [],
+                        config: {
+                            ...data.config,
+                            srtFile: null,
+                            audioFile: null
+                        }
+                    };
+                });
+                
+                return restored;
+            } catch (err) {
+                console.error('加载本地存储任务失败:', err);
+                return {};
+            }
+        }
+
         // WebSocket 连接
         function connectWebSocket() {
             const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -636,6 +690,34 @@
             ws.onmessage = (event) => {
                 const data = JSON.parse(event.data);
                 console.log('收到消息:', data);
+
+                // 收到未知任务消息时创建占位任务，避免刷新后丢失
+                if (!tasks[data.task_id]) {
+                    tasks[data.task_id] = {
+                        id: data.task_id,
+                        name: data.task_id,
+                        state: 'running',
+                        progress: 0,
+                        total: 0,
+                        success: 0,
+                        failure: 0,
+                        skipped: 0,
+                        logs: [],
+                        createTime: new Date(),
+                        config: {
+                            apiUrl: 'http://localhost:8001/tts',
+                            maxConcurrent: 8,
+                            splitConcurrent: 4,
+                            batchSize: 10,
+                            restDuration: 2,
+                            retryCount: 3,
+                            srtFile: null,
+                            audioFile: null
+                        }
+                    };
+                    renderTaskList();
+                }
+
                 if (data.msg_type === 'status') {
                     updateTaskStatus(data.task_id, { state: data.content });
                 } else if (data.msg_type === 'log') {
@@ -649,6 +731,63 @@
                 console.log('WebSocket 断开，3秒后重连');
                 setTimeout(connectWebSocket, 3000);
             };
+        }
+
+        // 拉取历史任务，刷新后恢复列表
+        async function loadExistingTasks() {
+            try {
+                // 先从本地存储加载
+                const localTasks = loadTasksFromStorage();
+                Object.assign(tasks, localTasks);
+                
+                // 再从后端加载已启动/完成的任务
+                const res = await fetch('/api/tasks');
+                if (res.ok) {
+                    const data = await res.json();
+                    const list = data.tasks || [];
+
+                    list.forEach(task => {
+                        // 后端的任务覆盖本地的（因为后端是真实状态）
+                        tasks[task.id] = {
+                            id: task.id,
+                            name: task.name || task.id,
+                            state: task.status || 'running',
+                            progress: 0,
+                            total: 0,
+                            success: 0,
+                            failure: 0,
+                            skipped: 0,
+                            logs: [],
+                            createTime: new Date((task.created_at || Date.now() / 1000) * 1000),
+                            config: {
+                                apiUrl: 'http://localhost:8001/tts',
+                                maxConcurrent: 8,
+                                splitConcurrent: 4,
+                                batchSize: 10,
+                                restDuration: 2,
+                                retryCount: 3,
+                                srtFile: null,
+                                audioFile: null
+                            }
+                        };
+                    });
+                }
+
+                renderTaskList();
+
+                if (!currentTaskId && Object.keys(tasks).length > 0) {
+                    const firstTask = Object.values(tasks)[0];
+                    selectTask(firstTask.id);
+                } else if (Object.keys(tasks).length === 0) {
+                    document.getElementById('emptyState').style.display = 'flex';
+                }
+            } catch (err) {
+                console.error('加载历史任务失败:', err);
+                // 至少加载本地任务
+                const localTasks = loadTasksFromStorage();
+                Object.assign(tasks, localTasks);
+                renderTaskList();
+            }
         }
 
         // 创建新任务
@@ -691,6 +830,7 @@
             };
             selectTask(taskId);
             renderTaskList();
+            saveTasks();
             closeModal();
             document.getElementById('newTaskName').value = '';
         }
@@ -769,6 +909,8 @@
             task.config.batchSize = parseInt(document.getElementById('batchSize').value);
             task.config.restDuration = parseInt(document.getElementById('restDuration').value);
             task.config.retryCount = parseInt(document.getElementById('retryCount').value);
+            
+            saveTasks();
         }
 
         // 显示运行视图
@@ -912,6 +1054,7 @@
             
             // 从列表中移除
             delete tasks[targetId];
+            saveTasks();
             
             // 如果有 serverTaskId，通知后端删除
             if (task.serverTaskId) {
@@ -957,7 +1100,30 @@
 
         // 更新任务状态
         function updateTaskStatus(taskId, status) {
-            if (!tasks[taskId]) return;
+            if (!tasks[taskId]) {
+                tasks[taskId] = {
+                    id: taskId,
+                    name: taskId,
+                    state: status.state || 'running',
+                    progress: 0,
+                    total: 0,
+                    success: 0,
+                    failure: 0,
+                    skipped: 0,
+                    logs: [],
+                    createTime: new Date(),
+                    config: {
+                        apiUrl: 'http://localhost:8001/tts',
+                        maxConcurrent: 8,
+                        splitConcurrent: 4,
+                        batchSize: 10,
+                        restDuration: 2,
+                        retryCount: 3,
+                        srtFile: null,
+                        audioFile: null
+                    }
+                };
+            }
             const task = tasks[taskId];
             task.state = status.state;
             task.progress = status.progress;
@@ -1080,7 +1246,7 @@
         }
 
         // 初始化
-        connectWebSocket();
+        loadExistingTasks().finally(() => connectWebSocket());
     </script>
 </body>
 </html>

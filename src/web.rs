@@ -261,7 +261,7 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
                 let _ = tx.send(WsMessage {
                     task_id: task_id.to_string(),
                     msg_type: "log".to_string(),
-                    content: "任务完成！".to_string(),
+                    content: "✓ 任务完成！".to_string(),
                 });
                 let _ = tx.send(WsMessage {
                     task_id: task_id.to_string(),
@@ -275,7 +275,7 @@ async fn execute_task(task_id: &str, srt: PathBuf, audio: PathBuf, state: &AppSt
                 let _ = tx.send(WsMessage {
                     task_id: task_id.to_string(),
                     msg_type: "log".to_string(),
-                    content: format!("任务失败: {}", e),
+                    content: format!("✗ 任务失败: {}", e),
                 });
                 let _ = tx.send(WsMessage {
                     task_id: task_id.to_string(),
