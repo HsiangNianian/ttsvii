@@ -237,14 +237,24 @@ async fn run_cli_mode(
 
         // 批次处理任务（带失败重试机制）
         let tasks = task_manager.get_tasks();
-        let tasks_len = tasks.len();
-        let batch_task_count = batch_size * max_concurrent;
+        // 动态批次大小，根据实时时延微调
+        let mut dynamic_batch_size = batch_size.max(1);
+        let mut batch_task_count = dynamic_batch_size * max_concurrent;
         // 记录需要重试的任务（失败的任务索引）
         let mut failed_task_indices: HashSet<usize> = HashSet::new();
         let mut retry_round = 0;
+        const MAX_RETRY_ROUNDS: u32 = 3;
 
         loop {
             retry_round += 1;
+
+            // 检查是否超过最大重试轮数
+            if retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty() {
+                println!("\n⚠️  重试已达到最大轮数 ({}), 仍有 {} 个任务失败", MAX_RETRY_ROUNDS, failed_task_indices.len());
+                println!("正在自动切换到恢复模式以继续处理...");
+                println!("\n任务 ID: {} (用于后续手动恢复)", uuid_str);
+                break;
+            }
             if retry_round > 1 {
                 println!("\n=== 第 {} 轮重试失败任务 ===", retry_round - 1);
                 println!("等待 60 秒后开始重试...");
@@ -268,31 +278,32 @@ async fn run_cli_mode(
                 break;
             }
 
-            println!(
-                "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
-                tasks_to_process.len(),
-                retry_round
-            );
-
-            // 重置执行器统计
-            executor.set_total(tasks_to_process.len() as u64);
-            let (old_success, old_failure) = executor.get_stats();
-            let initial_success = old_success;
-            let initial_failure = old_failure;
+            // 仅在第一轮时初始化进度条，后续轮数只更新进度数
+            if retry_round == 1 {
+                executor.set_total(tasks_to_process.len() as u64);
+                println!(
+                    "\n开始处理 {} 个任务（本轮: 第 {} 轮）...",
+                    tasks_to_process.len(),
+                    retry_round
+                );
+            } else {
+                executor.set_total(tasks_to_process.len() as u64);
+                println!(
+                    "本轮处理 {} 个失败任务...",
+                    tasks_to_process.len()
+                );
+            }
 
             // 按批次处理
-            let mut batch_num = 0;
             for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
-                batch_num += 1;
+                let batch_num = (batch_start / batch_task_count) + 1;
                 let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
                 let batch_tasks = &tasks_to_process[batch_start..batch_end];
+                let total_batches = (tasks_to_process.len() + batch_task_count - 1) / batch_task_count;
 
                 println!(
-                    "\n批次 {}/{}: 处理任务 {}-{}",
-                    batch_num,
-                    (tasks_to_process.len() + batch_task_count - 1) / batch_task_count,
-                    batch_start + 1,
-                    batch_end
+                    "批次 {}/{}: 处理任务 {}-{}",
+                    batch_num, total_batches, batch_start + 1, batch_end
                 );
 
                 // 执行当前批次
@@ -301,24 +312,29 @@ async fn run_cli_mode(
                     .map(|(_, task)| {
                         let task = (*task).clone();
                         let executor = executor.clone();
-                        async move {
-                            let result = executor.execute_task(task).await;
-                            result
-                        }
+                        async move { executor.execute_task(task).await }
                     })
                     .collect();
 
-                println!("开始执行批次任务...");
-                let batch_results = futures::future::join_all(futures).await;
-                println!("批次任务执行完成，开始收集结果...");
+                let _ = futures::future::join_all(futures).await;
 
-                // 显示实时统计
+                // 批次完成后统一打印一次统计信息
+                let (p50, p95, _, _) = executor.metrics_snapshot();
                 let (success, failure) = executor.get_stats();
                 let completed = success + failure;
+                
                 println!(
-                    "实时统计: 进度 {}/{} | 成功: {} | 失败: {}",
-                    completed, tasks_to_process.len(), success, failure
+                    "✓ 时延p50={:.0}ms p95={:.0}ms | 进度{}/{} | 成功:{} 失败:{} | 批次大小={} 并发={}",
+                    p50, p95, completed, tasks_to_process.len(), success, failure, dynamic_batch_size, max_concurrent
                 );
+
+                // p95 较高则缩小批次，p95 较低则放大到上限（2 倍初始）
+                if p95 > 4000.0 && dynamic_batch_size > 1 {
+                    dynamic_batch_size = (dynamic_batch_size / 2).max(1);
+                } else if p95 < 1500.0 {
+                    dynamic_batch_size = (dynamic_batch_size + 1).min(batch_size * 2).max(1);
+                }
+                batch_task_count = dynamic_batch_size * max_concurrent;
 
                 // 如果不是最后一批，休息一下
                 if batch_end < tasks_to_process.len() {
@@ -357,6 +373,27 @@ async fn run_cli_mode(
         }
 
         executor.finish();
+
+        // 检查是否由于重试超限进入恢复模式
+        let should_enter_resume_mode = retry_round > MAX_RETRY_ROUNDS && !failed_task_indices.is_empty();
+        if should_enter_resume_mode {
+            println!("\n[恢复模式] 进入恢复模式处理失败任务...");
+            // 直接调用恢复模式处理
+            return resume_and_merge(
+                uuid_str,
+                &tmp_dir,
+                &output_task_dir,
+                api_url,
+                output,
+                max_concurrent,
+                batch_size,
+                rest_duration,
+                retry_count,
+                audio,
+                srt,
+            )
+            .await;
+        }
 
         println!("\n所有任务执行完成，开始音频可用性校验...");
 
@@ -806,6 +843,203 @@ async fn resume_cli_task(
     } else {
         println!("未提供原始音频文件，跳过变速合并步骤。");
     }
+
+    Ok(())
+}
+
+/// 恢复模式：对未完成的任务进行重试，然后直接进行合并
+async fn resume_and_merge(
+    uuid_str: String,
+    tmp_dir: &PathBuf,
+    output_task_dir: &PathBuf,
+    api_url: String,
+    output: PathBuf,
+    max_concurrent: usize,
+    batch_size: usize,
+    rest_duration: u64,
+    retry_count: u32,
+    audio: PathBuf,
+    srt: PathBuf,
+) -> Result<()> {
+    println!("\n[恢复] 正在解析 SRT 文件...");
+    let srt_entries = srt::SrtParser::parse_file(&srt).context("解析 SRT 文件失败")?;
+    println!("[恢复] 成功解析 SRT 文件: {} 个条目", srt_entries.len());
+
+    let dummy_audio_path = PathBuf::from("");
+    let task_manager = TaskManager::new(
+        srt_entries.clone(),
+        &dummy_audio_path,
+        tmp_dir,
+        output_task_dir,
+    )?;
+
+    let api_client = std::sync::Arc::new(api::ApiClient::new(api_url.clone()));
+    let executor = std::sync::Arc::new(TaskExecutor::new(api_client, max_concurrent, retry_count));
+
+    let tasks = task_manager.get_tasks();
+
+    // 找出未完成的任务
+    let mut pending_indices = Vec::new();
+    for (idx, task) in tasks.iter().enumerate() {
+        if !task.tmp_audio.exists() {
+            continue;
+        }
+
+        let completed = match tokio::fs::metadata(&task.output_path).await {
+            Ok(m) => m.len() > 0,
+            Err(_) => false,
+        };
+
+        if !completed {
+            pending_indices.push(idx);
+        }
+    }
+
+    println!(
+        "[恢复] 待处理任务: {} / {}",
+        pending_indices.len(),
+        tasks.len()
+    );
+
+    if !pending_indices.is_empty() {
+        executor.set_total(pending_indices.len() as u64);
+
+        let batch_task_count = batch_size * max_concurrent;
+        let mut failed_indices: HashSet<usize> = HashSet::new();
+        let mut retry_round = 0;
+
+        loop {
+            retry_round += 1;
+
+            if retry_round > 1 {
+                if failed_indices.is_empty() {
+                    break;
+                }
+                println!("\n[恢复] 第 {} 轮重试...", retry_round - 1);
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+            }
+
+            let tasks_to_process: Vec<(usize, &task::Task)> = if retry_round == 1 {
+                pending_indices
+                    .iter()
+                    .map(|&idx| (idx, &tasks[idx]))
+                    .collect()
+            } else {
+                failed_indices
+                    .iter()
+                    .filter_map(|&idx| tasks.get(idx).map(|task| (idx, task)))
+                    .collect()
+            };
+
+            if tasks_to_process.is_empty() && retry_round > 1 {
+                break;
+            }
+
+            println!(
+                "[恢复] 处理 {} 个任务（第 {} 轮）...",
+                tasks_to_process.len(),
+                retry_round
+            );
+
+            // 每轮只设置一次进度
+            executor.set_total(tasks_to_process.len() as u64);
+
+            for batch_start in (0..tasks_to_process.len()).step_by(batch_task_count) {
+                let batch_end = (batch_start + batch_task_count).min(tasks_to_process.len());
+                let batch_tasks = &tasks_to_process[batch_start..batch_end];
+
+                let futures: Vec<_> = batch_tasks
+                    .iter()
+                    .map(|(_, task)| {
+                        let task = (*task).clone();
+                        let executor = executor.clone();
+                        async move { executor.execute_task(task).await }
+                    })
+                    .collect();
+
+                let _ = futures::future::join_all(futures).await;
+
+                let (success, failure) = executor.get_stats();
+                println!(
+                    "[恢复] 进度 {}/{} | 成功: {} | 失败: {}",
+                    success + failure,
+                    tasks_to_process.len(),
+                    success,
+                    failure
+                );
+
+                if batch_end < tasks_to_process.len() {
+                    tokio::time::sleep(std::time::Duration::from_secs(rest_duration)).await;
+                }
+            }
+
+            let mut new_failed = HashSet::new();
+            for (original_idx, _) in tasks_to_process.iter() {
+                if !tasks[*original_idx].output_path.exists() {
+                    new_failed.insert(*original_idx);
+                }
+            }
+            failed_indices = new_failed;
+
+            if failed_indices.is_empty() {
+                break;
+            }
+        }
+
+        executor.finish();
+    }
+
+    println!("\n[恢复] 收集音频文件用于合并...");
+
+    let mut audio_files = Vec::new();
+    let mut srt_entries_for_merge = Vec::new();
+    let mut sorted_tasks: Vec<_> = tasks.iter().collect();
+    sorted_tasks.sort_by_key(|task| task.entry.index);
+
+    for task in sorted_tasks {
+        if task.output_path.exists() {
+            let metadata = tokio::fs::metadata(&task.output_path).await?;
+            if metadata.len() > 44 {
+                audio_files.push(task.output_path.clone());
+                srt_entries_for_merge.push(task.entry.clone());
+            }
+        }
+    }
+
+    if audio_files.is_empty() {
+        anyhow::bail!("没有有效的合成音频文件可以合并");
+    }
+
+    println!(
+        "[恢复] 找到 {} 个有效的音频文件，开始合并...",
+        audio_files.len()
+    );
+
+    let final_output = output.join(format!("{}.wav", uuid_str));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1800),
+        audio::AudioSplitter::merge_audio(&audio_files, &final_output),
+    )
+    .await
+    .context("合并音频超时（超过 30 分钟）")??;
+
+    println!("[恢复] 原始合并完成: {}", final_output.display());
+
+    let timed_output = output.join(format!("{}_timed.wav", uuid_str));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(1800),
+        audio::AudioSplitter::merge_audio_with_timing(
+            &audio_files,
+            &srt_entries_for_merge,
+            &timed_output,
+            &audio,
+            None::<fn(usize, usize, String)>,
+        ),
+    )
+    .await
+    .context("合并变速音频超时（超过 30 分钟）")??;
+
+    println!("[恢复] 变速合并完成: {}", timed_output.display());
 
     Ok(())
 }
