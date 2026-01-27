@@ -110,7 +110,7 @@ jobs:
   # 创建发布
   release:
     name: Create Release
-    needs: [check, test, build]
+    needs: [build]
     runs-on: ubuntu-latest
     if: github.event_name == 'release'
     steps:
